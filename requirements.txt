@@ -1,0 +1,12 @@
+streamlit
+groq
+pytesseract
+Pillow
+pdf2image
+PyPDF2
+scikit-learn
+numpy
+python-pptx
+python-docx
+PyMuPDF
+markitdown[all]
