@@ -23,11 +23,6 @@ custom = """
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     }
     
-    /* Sidebar styling */
-    [data-testid="stSidebar"] {
-        # background: linear-gradient(180deg, #1e1e2e 0%, #2d2d44 100%);
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
-    }
     
     .sidebarText {
         color: #e0e0e0 !important;
@@ -158,6 +153,10 @@ custom = """
     }
     
     /* Progress bar */
+    .progress-container {
+        background-color: #fff;
+    }
+
     .stProgress > div > div > div {
         background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
         border-radius: 10px;

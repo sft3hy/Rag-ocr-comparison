@@ -10,3 +10,5 @@ python-pptx
 python-docx
 PyMuPDF
 markitdown[all]
+ultralytics
+timm
