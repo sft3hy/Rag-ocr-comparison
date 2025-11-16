@@ -1,100 +1,69 @@
 """
-Smart RAG Implementation with OCR, Vision Model, and Advanced Chunking
+Smart RAG Implementation with Pluggable Vision Models
 
-Features:
-- Converts documents to Markdown
-- Uses Tesseract OCR for non-native text
-- Uses Moondream2 for chart/image understanding
-- Smart semantic chunking and vectorization
-- FAISS vector store for efficient retrieval
-- MODIFIED: Pluggable ML-based chart detection (YOLOv8, TATR, or Heuristics)
-
-Requirements:
-pip install pymupdf pytesseract pillow torch transformers sentence-transformers faiss-cpu numpy groq
-Also requires tesseract-ocr installed on system
-
-For ML Chart Detectors:
-# For YOLOv8
-pip install ultralytics
-# For Table Transformer (TATR)
-pip install timm
+Key Changes:
+- Vision models are now pluggable via VisionModelFactory
+- Users can select: Moondream2, Qwen3-VL, or InternVL3.5
+- Simplified vision model initialization
 """
 
 import os
 import re
 import io
-import fitz  # PyMuPDF
+import fitz
 import pytesseract
 from PIL import Image
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    AutoImageProcessor,
-    TableTransformerForObjectDetection,
-)
+from transformers import AutoImageProcessor, TableTransformerForObjectDetection
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from groq import Groq
 import warnings
+from docx import Document
+from pptx import Presentation
+import subprocess
 
-# Suppress warnings
+# Import our new vision model factory
+from vision_models import VisionModelFactory
+
 warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# --- ML-based Chart Detector Classes ---
 
-
+# ... [Keep all the ChartDetector classes exactly as they were] ...
 class ChartDetector:
     """Base class for chart detection models."""
 
     def __init__(self, *args, **kwargs):
-        # Define the device FIRST
         self.device = (
             "mps"
             if torch.backends.mps.is_available()
             else "cuda" if torch.cuda.is_available() else "cpu"
         )
         print(f"ChartDetector using device: {self.device}")
-
-        # THEN load the model
         self.model = self.load_model(*args, **kwargs)
 
     def load_model(self, *args, **kwargs):
         raise NotImplementedError("Subclasses must implement this method.")
 
     def detect(self, page_image: Image.Image) -> List[Tuple[int, int, int, int]]:
-        """
-        Detects chart regions in a given page image.
-        Returns a list of bounding boxes [x1, y1, x2, y2].
-        """
         raise NotImplementedError("Subclasses must implement this method.")
 
 
 class HeuristicDetector(ChartDetector):
-    """
-    The original heuristic-based chart detection logic.
-    This is kept as a fallback or for comparison.
-    """
+    """Heuristic-based chart detection logic"""
 
     def load_model(self, *args, **kwargs):
-        # No model to load for heuristics
-        print("Using HeuristicDetector. No ML model loaded.")
+        print("Using HeuristicDetector.")
         return None
 
     def detect(self, page_image: Image.Image) -> List[Tuple[int, int, int, int]]:
-        """
-        Tries to find charts by dividing the page into a grid.
-        This is a simplified version of the original logic, applied to a full-page image.
-        """
         boxes = []
         page_width, page_height = page_image.size
-
-        # Divide page into 2x2 grid and check each section
-        grid_divisions = 2
+        grid_divisions = 3
         section_width = page_width // grid_divisions
         section_height = page_height // grid_divisions
 
@@ -104,10 +73,8 @@ class HeuristicDetector(ChartDetector):
                 y1 = row * section_height
                 x2 = (col + 1) * section_width
                 y2 = (row + 1) * section_height
-
                 section_image = page_image.crop((x1, y1, x2, y2))
 
-                # Check if the section looks like a chart
                 if self._looks_like_chart(section_image):
                     boxes.append((x1, y1, x2, y2))
                     print(
@@ -116,20 +83,14 @@ class HeuristicDetector(ChartDetector):
         return boxes
 
     def _looks_like_chart(self, image: Image.Image) -> bool:
-        """Heuristic to determine if an image region contains a chart."""
         try:
             width, height = image.size
-            if width < 150 or height < 150:
+            if width < 50 or height < 50:
                 return False
-
             ocr_text = pytesseract.image_to_string(image).strip()
             text_density = (len(ocr_text) / (width * height)) * 1000
-
-            # Reject if it's mostly dense text
             if text_density > 0.4:
                 return False
-
-            # Check for visual complexity (variance)
             img_array = np.array(image.convert("L"))
             variance = np.var(img_array)
             return variance > 500
@@ -137,68 +98,18 @@ class HeuristicDetector(ChartDetector):
             return False
 
 
-class YOLOv8Detector(ChartDetector):
-    """
-    Chart detection using a YOLOv8 model.
-    NOTE: The user should provide a model fine-tuned for charts.
-    We use a table-detection model here as a placeholder/example.
-    """
-
-    def load_model(self, model_path: str = "foduucom/table-detection-and-extraction"):
-        try:
-            from ultralytics import YOLO
-
-            print(f"Loading YOLOv8 model from: {model_path}")
-            # This can be a path to a local .pt file or a HuggingFace repo
-            print("here")
-            model = YOLO("foduucom/table-detection-and-extraction")
-            print("here 2")
-            model.to(self.device)
-            return model
-        except ImportError:
-            raise ImportError(
-                "YOLOv8 requires 'ultralytics' to be installed. Please run 'pip install ultralytics'"
-            )
-        except Exception as e:
-            print(f"Error loading YOLOv8 model: {e}")
-            return None
-
-    def detect(self, page_image: Image.Image) -> List[Tuple[int, int, int, int]]:
-        if not self.model:
-            return []
-
-        results = self.model(
-            page_image, verbose=False
-        )  # verbose=False to reduce console spam
-        boxes = []
-        for result in results:
-            # Note: You might need to adjust this based on your model's classes
-            # For this table model, we assume class 0 is 'table' and class 1 is 'table rotated'
-            for box in result.boxes:
-                # if int(box.cls) in [0, 1]: # Filter for specific classes if needed
-                coords = box.xyxy[0].cpu().numpy().astype(int)
-                boxes.append(tuple(coords))
-        print(f"    YOLOv8 detected {len(boxes)} potential charts/tables.")
-        return boxes
-
-
 class TATRDetector(ChartDetector):
-    """
-    Chart/Table detection using Microsoft's Table Transformer (TATR).
-    This model is specifically for tables but the architecture is suitable for charts.
-    """
+    """Table Transformer (TATR) detection"""
 
     def load_model(self, model_path: str = "microsoft/table-transformer-detection"):
         try:
             print(f"Loading Table Transformer model: {model_path}")
-            self.image_processor = AutoImageProcessor.from_pretrained(model_path)
+            self.image_processor = AutoImageProcessor.from_pretrained(
+                model_path, use_fast=True
+            )
             model = TableTransformerForObjectDetection.from_pretrained(model_path)
             model.to(self.device)
             return model
-        except ImportError:
-            raise ImportError(
-                "Table Transformer requires 'timm' to be installed. Please run 'pip install timm'"
-            )
         except Exception as e:
             print(f"Error loading TATR model: {e}")
             return None
@@ -206,26 +117,20 @@ class TATRDetector(ChartDetector):
     def detect(self, page_image: Image.Image) -> List[Tuple[int, int, int, int]]:
         if not self.model:
             return []
-
         inputs = self.image_processor(images=page_image, return_tensors="pt").to(
             self.device
         )
         outputs = self.model(**inputs)
-
-        # Post-process to get bounding boxes
         target_sizes = torch.tensor([page_image.size[::-1]]).to(self.device)
         results = self.image_processor.post_process_object_detection(
             outputs, threshold=0.8, target_sizes=target_sizes
         )[0]
-
         boxes = []
         for score, label, box in zip(
             results["scores"], results["labels"], results["boxes"]
         ):
-            # Note: you may want to filter by label if your model detects multiple object types
             box = [round(i, 2) for i in box.tolist()]
             boxes.append(tuple(map(int, box)))
-
         print(f"    Table Transformer detected {len(boxes)} potential charts/tables.")
         return boxes
 
@@ -245,166 +150,326 @@ class SmartRAG:
         self,
         model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
         output_dir: str = "potential_charts",
-        chart_detector_model: str = "heuristic",  # New: "heuristic", "yolo", or "tatr"
+        vision_model_name: str = "Moondream2",  # NEW PARAMETER
     ):
         """
         Initialize the RAG system.
+
         Args:
-            model_name (str): Name of the sentence transformer model.
-            output_dir (str): Directory to save extracted charts.
-            chart_detector_model (str): The chart detection model to use.
-                                        Options: 'heuristic', 'yolo', 'tatr'.
+            model_name: Sentence transformer model for embeddings
+            output_dir: Directory to save extracted charts
+            vision_model_name: Vision model to use (Moondream2, Qwen3-VL-2B, InternVL3.5-1B)
         """
         print("Initializing Smart RAG system...")
+        print(f"Selected vision model: {vision_model_name}")
 
         self.groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
-
-        # Embedding model for vectorization
         self.embedding_model = SentenceTransformer(model_name)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
 
-        # Create output directory for charts
+        # Create output directory
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         print(f"Chart output directory: {self.output_dir}")
 
-        # --- NEW: Initialize the selected chart detector ---
-        if chart_detector_model.lower() == "yolo":
-            # You can point this to a local .pt file for your custom model
-            # e.g., YOLOv8Detector("path/to/your/best.pt")
-            self.chart_detector = YOLOv8Detector()
-        elif chart_detector_model.lower() == "tatr":
-            self.chart_detector = TATRDetector()
-        elif chart_detector_model.lower() == "heuristic":
-            self.chart_detector = HeuristicDetector()
-        else:
-            raise ValueError(
-                "Unsupported chart_detector_model. Choose from 'heuristic', 'yolo', 'tatr'."
-            )
+        # Initialize chart detectors
+        self.chart_detector_tatr = TATRDetector()
+        self.chart_detector_heuristic = HeuristicDetector()
 
-        # Vision model for chart understanding
+        # NEW: Load vision model using factory
+        self.vision_model_name = vision_model_name
+        self.vision_model = None
         self.use_vision = False
+
         try:
-            print("Loading Moondream2 vision model...")
-            device = (
-                "mps"
-                if torch.backends.mps.is_available()
-                else "cuda" if torch.cuda.is_available() else "cpu"
-            )
+            print(f"\nLoading vision model: {vision_model_name}...")
+            self.vision_model = VisionModelFactory.create_model(vision_model_name)
 
-            model_id = "vikhyatk/moondream2"
-            self.vision_model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                revision="2025-06-21",
-                trust_remote_code=True,
-                device_map={"": "mps"},  # Enable GPU acceleration using MPS
-            )
+            if self.vision_model:
+                self.use_vision = True
+                print(f"✓ Vision model '{vision_model_name}' loaded successfully")
+            else:
+                print(f"✗ Failed to load vision model '{vision_model_name}'")
+                print("Continuing without vision capabilities")
 
-            self.vision_tokenizer = AutoTokenizer.from_pretrained(
-                model_id, trust_remote_code=True
-            )
-            self.vision_device = device
-            self.use_vision = True
-            print(f"Vision model loaded successfully on {device}")
         except Exception as e:
             print(f"Error loading vision model: {e}")
+            print("Continuing without vision capabilities")
             self.use_vision = False
 
         # Vector store
         self.index = None
         self.chunks: List[Chunk] = []
-        self.chart_descriptions = {}  # Store chart descriptions by filename
+        self.chart_descriptions = {}
+
+    # ... [Keep all the utility methods exactly as they were] ...
+    def _expand_box(
+        self,
+        box: Tuple[int, int, int, int],
+        page_width: int,
+        page_height: int,
+        padding_percent: float = 0.1,
+    ) -> Tuple[int, int, int, int]:
+        x1, y1, x2, y2 = box
+        width = x2 - x1
+        height = y2 - y1
+        pad_x = int(width * padding_percent * 5)
+        pad_y = int(height * padding_percent)
+        x1 = max(0, x1 - pad_x)
+        y1 = max(0, y1 - pad_y)
+        x2 = min(page_width, x2 + pad_x)
+        y2 = min(page_height, y2 + pad_y)
+        return (x1, y1, x2, y2)
+
+    def _calculate_iou(
+        self, box1: Tuple[int, int, int, int], box2: Tuple[int, int, int, int]
+    ) -> float:
+        x1_inter = max(box1[0], box2[0])
+        y1_inter = max(box1[1], box2[1])
+        x2_inter = min(box1[2], box2[2])
+        y2_inter = min(box1[3], box2[3])
+        if x2_inter < x1_inter or y2_inter < y1_inter:
+            return 0.0
+        intersection_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union_area = box1_area + box2_area - intersection_area
+        if union_area == 0:
+            return 0.0
+        return intersection_area / union_area
+
+    def _combine_and_deduplicate_boxes(
+        self,
+        boxes1: List[Tuple[int, int, int, int]],
+        boxes2: List[Tuple[int, int, int, int]],
+        iou_threshold: float = 0.5,
+    ) -> List[Tuple[int, int, int, int]]:
+        if not boxes1 and not boxes2:
+            return []
+        all_boxes = list(boxes1) + list(boxes2)
+        if len(all_boxes) == 0:
+            return []
+        unique_boxes = []
+        for box in all_boxes:
+            is_duplicate = False
+            for unique_box in unique_boxes:
+                iou = self._calculate_iou(box, unique_box)
+                if iou > iou_threshold:
+                    is_duplicate = True
+                    box_area = (box[2] - box[0]) * (box[3] - box[1])
+                    unique_box_area = (unique_box[2] - unique_box[0]) * (
+                        unique_box[3] - unique_box[1]
+                    )
+                    if box_area > unique_box_area:
+                        idx = unique_boxes.index(unique_box)
+                        unique_boxes[idx] = box
+                    break
+            if not is_duplicate:
+                unique_boxes.append(box)
+        return unique_boxes
+
+    # UPDATED: Simplified image description methods
+    def _describe_image(self, image: Image.Image) -> str:
+        """Use selected vision model to describe charts and diagrams"""
+        if not self.use_vision or not self.vision_model:
+            return "[Vision model not available]"
+
+        prompt = """
+Describe this chart or diagram in complete detail. Include ALL data points, trends, labels, axis information, and key insights. List specific numbers, percentages, years, and values shown. Describe the complete trend from beginning to end.
+"""
+        return self.vision_model.describe_image(image, prompt)
+
+    def _describe_slide(self, slide_image: Image.Image) -> str:
+        """Use vision model to provide comprehensive slide description"""
+        if not self.use_vision or not self.vision_model:
+            return "[Vision model not available]"
+
+        prompt = """
+Describe the PowerPoint slide clearly and precisely. Include:
+
+Title/Heading: State what the slide is about.
+
+Text Content: Summarize all visible text (titles, labels, bullets, captions).
+
+Visual Elements: Describe all charts, graphs, diagrams, images, or icons. For charts, include:
+- Chart type
+- What each axis or category represents
+- Key trends, patterns, and directional changes (e.g., increasing, decreasing, flat, spikes, clusters)
+- Notable data points or ranges if visible
+
+Layout & Design: Briefly note how the slide is structured and how elements are arranged.
+
+Key Insight: State the main takeaway in one clear sentence.
+
+Be specific with numbers, dates, and labels when they appear. Keep the description factual and concise.
+"""
+        return self.vision_model.describe_image(slide_image, prompt)
+
+    # ... [Keep ALL remaining methods exactly as they were in the original code] ...
+    # This includes: extract_text_from_pptx, _convert_pptx_to_images, extract_text_from_docx,
+    # diagnose_pptx, _render_slide_to_image, extract_charts_as_images, _looks_like_chart,
+    # _has_chart_aspect_ratio, extract_text_from_pdf, _is_likely_chart, _convert_to_markdown,
+    # smart_chunk, _get_page_from_context, index_document, search, query
+
+    def extract_text_from_pptx(
+        self, pptx_path: str, file_output_dir: str, progress_callback=None
+    ) -> str:
+        print(f"Processing PPTX: {pptx_path}")
+        prs = Presentation(pptx_path)
+        full_text = []
+        total_slides = len(prs.slides)
+        slide_images = self._convert_pptx_to_images(pptx_path, file_output_dir)
+
+        for slide_idx, slide in enumerate(prs.slides):
+            print(f"\nProcessing slide {slide_idx + 1}/{total_slides}...")
+            if progress_callback:
+                progress_callback(slide_idx + 1, total_slides)
+
+            slide_text = [f"## Slide {slide_idx + 1}\n"]
+            text_content = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    text_content.append(shape.text.strip())
+
+            if text_content:
+                slide_text.append("Text content:\n" + "\n".join(text_content) + "\n")
+
+            slide_image = None
+            if slide_idx < len(slide_images):
+                slide_image = slide_images[slide_idx]
+
+            if slide_image and self.use_vision:
+                print(f"  Analyzing full slide with vision model...")
+                slide_filename = f"slide{slide_idx + 1}_full.png"
+                slide_path = os.path.join(file_output_dir, slide_filename)
+                slide_image.save(slide_path)
+                description = self._describe_slide(slide_image)
+                slide_text.append(f"\n[SLIDE VISUAL DESCRIPTION: {description}]\n")
+                self.chart_descriptions[slide_filename] = description
+
+            full_text.append("\n".join(slide_text))
+
+        return "\n\n".join(full_text)
+
+    def _convert_pptx_to_images(
+        self, pptx_path: str, output_dir: str
+    ) -> List[Image.Image]:
+        images = []
+        try:
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                pdf_path = os.path.join(tmpdir, "presentation.pdf")
+                cmd = [
+                    "soffice",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    tmpdir,
+                    pptx_path,
+                ]
+                result = subprocess.run(
+                    cmd, capture_output=True, timeout=120, text=True
+                )
+                if result.returncode == 0:
+                    pdf_files = [f for f in os.listdir(tmpdir) if f.endswith(".pdf")]
+                    if pdf_files:
+                        pdf_path = os.path.join(tmpdir, pdf_files[0])
+                        doc = fitz.open(pdf_path)
+                        for page_num in range(len(doc)):
+                            page = doc[page_num]
+                            mat = fitz.Matrix(2.0, 2.0)
+                            pix = page.get_pixmap(matrix=mat)
+                            img_bytes = pix.tobytes("png")
+                            img = Image.open(io.BytesIO(img_bytes))
+                            images.append(img)
+                        doc.close()
+        except Exception as e:
+            print(f"  Error converting PPTX to images: {e}")
+        return images
+
+    def extract_text_from_docx(
+        self, docx_path: str, file_output_dir: str, progress_callback=None
+    ) -> str:
+        print(f"Processing DOCX: {docx_path}")
+        doc = Document(docx_path)
+        full_text = []
+
+        for para_idx, para in enumerate(doc.paragraphs):
+            if para.text.strip():
+                full_text.append(para.text)
+            if progress_callback and para_idx % 10 == 0:
+                progress_callback(para_idx, len(doc.paragraphs))
+
+        for rel_idx, rel in enumerate(doc.part.rels.values()):
+            if "image" in rel.target_ref:
+                try:
+                    image_data = rel.target_part.blob
+                    image = Image.open(io.BytesIO(image_data))
+                    if self._is_likely_chart(image):
+                        if self.use_vision:
+                            description = self._describe_image(image)
+                            full_text.append(f"\n[CHART DESCRIPTION: {description}]\n")
+                            chart_filename = f"docx_chart{rel_idx + 1}.png"
+                            chart_path = os.path.join(file_output_dir, chart_filename)
+                            image.save(chart_path)
+                            self.chart_descriptions[chart_filename] = description
+                    ocr_text = pytesseract.image_to_string(image)
+                    if ocr_text.strip():
+                        full_text.append(f"\n[OCR from image: {ocr_text}]\n")
+                except Exception as e:
+                    print(f"  Error processing image {rel_idx}: {e}")
+
+        return "\n\n".join(full_text)
 
     def extract_charts_as_images(
         self, page, file_output_dir: str, page_num: int
     ) -> List[Image.Image]:
-        """
-        REFACTORED: Extracts charts from a PDF page using the selected ML detector.
-        """
         charts = []
         try:
-            # 1. Render the entire page to an image at high resolution
-            mat = fitz.Matrix(3.0, 3.0)  # 3x zoom for better quality
+            mat = fitz.Matrix(4.0, 4.0)
             pix = page.get_pixmap(matrix=mat)
             page_image = Image.open(io.BytesIO(pix.tobytes("png")))
 
-            # 2. Use the selected detector to find chart bounding boxes
-            chart_boxes = self.chart_detector.detect(page_image)
+            chart_boxes_tatr = self.chart_detector_tatr.detect(page_image)
+            chart_boxes_heuristic = self.chart_detector_heuristic.detect(page_image)
+            chart_boxes_combined = self._combine_and_deduplicate_boxes(
+                chart_boxes_tatr, chart_boxes_heuristic, iou_threshold=0.5
+            )
 
-            # 3. Crop chart images from the page image using the bounding boxes
-            for i, box in enumerate(chart_boxes):
-                # The box coordinates are relative to the high-res page image
+            for i, box in enumerate(chart_boxes_combined):
+                box = self._expand_box(box, page_image.width, page_image.height)
                 chart_image = page_image.crop(box)
-
                 if chart_image.width < 150 or chart_image.height < 150:
-                    print(f"    Skipping detected region {i+1} - too small.")
                     continue
-
                 charts.append(chart_image)
-                print(f"    Captured chart region {i + 1}: {chart_image.size}")
-
-                # Save the chart to disk
                 chart_filename = f"page{page_num}_chart{i + 1}.png"
-                chart_path = os.path.join(self.output_dir, chart_filename)
+                chart_path = os.path.join(file_output_dir, chart_filename)
                 chart_image.save(chart_path)
-                print(f"    Saved chart to: {chart_path}")
 
         except Exception as e:
-            print(f"    Error during ML chart detection on page {page_num}: {e}")
-
+            print(f"    Error during chart detection on page {page_num}: {e}")
         return charts
 
     def _looks_like_chart(self, image: Image.Image) -> bool:
-        """
-        Heuristic to determine if an image region contains a chart.
-        Checks for visual complexity and non-text patterns.
-        """
         try:
-            # First do the text density check
             width, height = image.size
             ocr_text = pytesseract.image_to_string(image).strip()
-            text_length = len(ocr_text)
-            image_area = width * height
-            text_density = (text_length / image_area) * 1000
-
-            # Reject if too much text
+            text_density = (len(ocr_text) / (width * height)) * 1000
             if text_density > 0.4:
                 return False
-
-            # Then check visual complexity
             img_array = np.array(image.convert("L"))
             variance = np.var(img_array)
-
-            # Check aspect ratio
-            # if not self._has_chart_aspect_ratio(image):
-            #     print(f"      Rejecting: Unusual aspect ratio - likely not a chart")
-            #     return False
-            # Charts have varied pixel values but low text
             return variance > 500
-
         except:
-            # Fallback to simple variance check
             img_array = np.array(image.convert("L"))
             variance = np.var(img_array)
-            # Check aspect ratio
-            # if not self._has_chart_aspect_ratio(image):
-            #     print(f"      Rejecting: Unusual aspect ratio - likely not a chart")
-            #     return False
             return variance > 500
-
-    def _has_chart_aspect_ratio(self, image: Image.Image) -> bool:
-        """Charts typically have reasonable aspect ratios (not super wide or tall)"""
-        width, height = image.size
-        aspect_ratio = width / height if height > 0 else 0
-
-        # Charts are usually between 1:3 and 3:1 ratio
-        # Text screenshots often have extreme ratios
-        return 0.33 <= aspect_ratio <= 3.0
 
     def extract_text_from_pdf(
         self, pdf_path: str, file_output_dir: str, progress_callback=None
     ) -> str:
-        """Extract text from PDF with OCR fallback and image understanding"""
         print(f"Processing PDF: {pdf_path}")
         doc = fitz.open(pdf_path)
         full_text = []
@@ -420,10 +485,7 @@ class SmartRAG:
             if text.strip():
                 page_text.append(text)
 
-            # Method 1: Extract embedded images
             image_list = page.get_images(full=True)
-            print(f"  Found {len(image_list)} embedded images on page {page_num + 1}")
-
             for img_idx, img in enumerate(image_list):
                 try:
                     xref = img[0]
@@ -432,39 +494,23 @@ class SmartRAG:
                     image = Image.open(io.BytesIO(image_bytes))
 
                     if self._is_likely_chart(image):
-                        print(
-                            f"    Embedded image {img_idx + 1} is likely a chart (size: {image.size})"
-                        )
                         if self.use_vision:
-                            print(f"    Analyzing chart with vision model...")
                             description = self._describe_image(image)
-                            print(f"    Chart description (FULL):\n    {description}")
                             page_text.append(f"\n[CHART DESCRIPTION: {description}]\n")
-
                             chart_filename = (
                                 f"page{page_num + 1}_embedded{img_idx + 1}.png"
                             )
                             chart_path = os.path.join(file_output_dir, chart_filename)
                             image.save(chart_path)
-                            print(f"    Saved embedded image to: {chart_path}")
                             self.chart_descriptions[chart_filename] = description
-                    else:
-                        print(
-                            f"    Embedded image {img_idx + 1} is too small for chart analysis (size: {image.size})"
-                        )
 
                     ocr_text = pytesseract.image_to_string(image)
                     if ocr_text.strip():
-                        print(f"    Extracted {len(ocr_text)} characters via OCR")
                         page_text.append(f"\n[OCR from image: {ocr_text}]\n")
 
                 except Exception as e:
                     print(f"    Error processing embedded image {img_idx}: {str(e)}")
 
-            # Method 2: Use the new ML-based chart extractor for vector graphics
-            print(
-                f"  Searching for charts using {self.chart_detector.__class__.__name__}..."
-            )
             chart_images = self.extract_charts_as_images(
                 page=page, page_num=page_num + 1, file_output_dir=file_output_dir
             )
@@ -472,22 +518,13 @@ class SmartRAG:
             for chart_idx, chart_image in enumerate(chart_images):
                 try:
                     if self.use_vision:
-                        print(f"\n    ===== Analyzing Chart {chart_idx + 1} =====")
                         description = self._describe_image(chart_image)
-                        print(f"    FULL DESCRIPTION:\n    {description}")
-                        print(
-                            f"    ===== End Chart {chart_idx + 1} Description =====\n"
-                        )
                         page_text.append(f"\n[CHART DESCRIPTION: {description}]\n")
-
                         chart_filename = f"page{page_num + 1}_chart{chart_idx + 1}.png"
                         self.chart_descriptions[chart_filename] = description
 
                     ocr_text = pytesseract.image_to_string(chart_image)
                     if ocr_text.strip():
-                        print(
-                            f"    Extracted {len(ocr_text)} characters via OCR from chart region"
-                        )
                         page_text.append(f"\n[OCR from chart region: {ocr_text}]\n")
 
                 except Exception as e:
@@ -502,7 +539,6 @@ class SmartRAG:
         return "\n\n".join(full_text)
 
     def _is_likely_chart(self, image: Image.Image) -> bool:
-        """Heuristic to determine if image is likely a chart/diagram"""
         width, height = image.size
         if width < 200 or height < 200:
             return False
@@ -512,25 +548,10 @@ class SmartRAG:
                 (len(ocr_text) / (width * height)) * 1000 if (width * height) > 0 else 0
             )
             if text_density > 0.7:
-                print("text density too large: ", text_density)
                 return False
             return True
-        except Exception:
+        except:
             return True
-
-    def _describe_image(self, image: Image.Image) -> str:
-        """Use Moondream2 to describe charts and diagrams"""
-        try:
-            enc_image = self.vision_model.encode_image(image)
-            prompt = """
-Describe this chart or diagram in complete detail. Include ALL data points, trends, labels, axis information, and key insights. List specific numbers, percentages, years, and values shown. Describe the complete trend from beginning to end.
-"""
-            description = self.vision_model.answer_question(
-                enc_image, prompt, self.vision_tokenizer
-            )
-            return description
-        except Exception as e:
-            return f"[Image analysis failed: {str(e)}]"
 
     def _convert_to_markdown(self, text: str, page_num: int) -> str:
         markdown = f"## Page {page_num}\n\n"
@@ -554,26 +575,47 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
         self, text: str, source: str, chunk_size: int = 500, overlap: int = 100
     ) -> List[Chunk]:
         chunks = []
-        # Use a regex that captures chart descriptions as a whole
-        text_and_charts = re.split(
-            r"(\[CHART DESCRIPTION:.*?\])", text, flags=re.DOTALL
-        )
+        if "## Slide" in text and source.lower().endswith(".pptx"):
+            slides = re.split(r"(## Slide \d+)", text)
+            current_slide_num = 0
+            for i in range(1, len(slides), 2):
+                if i + 1 < len(slides):
+                    slide_header = slides[i]
+                    slide_content = slides[i + 1].strip()
+                    slide_match = re.search(r"## Slide (\d+)", slide_header)
+                    if slide_match:
+                        current_slide_num = int(slide_match.group(1))
+                    if slide_content:
+                        full_slide = f"{slide_header}\n{slide_content}"
+                        chunks.append(
+                            Chunk(
+                                text=full_slide,
+                                source=source,
+                                page=current_slide_num,
+                                chunk_id=len(chunks),
+                            )
+                        )
+            return chunks
 
+        text_and_charts = re.split(
+            r"(\[CHART DESCRIPTION:.*?\]|\[SLIDE VISUAL DESCRIPTION:.*?\])",
+            text,
+            flags=re.DOTALL,
+        )
         for piece in text_and_charts:
-            if piece.startswith("[CHART DESCRIPTION:"):
-                # Add the entire chart description as a single chunk
+            if piece.startswith("[CHART DESCRIPTION:") or piece.startswith(
+                "[SLIDE VISUAL DESCRIPTION:"
+            ):
                 chunks.append(
                     Chunk(
                         text=piece,
                         source=source,
-                        # You might need to parse the page number differently here
                         page=self._get_page_from_context(text, piece),
                         chunk_id=len(chunks),
                     )
                 )
             else:
-                # Process the regular text as before
-                pages = re.split(r"## Page (\d+)", piece)
+                pages = re.split(r"## (?:Page|Slide) (\d+)", piece)
                 current_page = 1
                 for i in range(1, len(pages), 2):
                     if i < len(pages):
@@ -581,6 +623,8 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
                         page_text = pages[i + 1] if i + 1 < len(pages) else ""
                     else:
                         page_text = pages[i]
+                    if not page_text.strip():
+                        continue
                     sentences = re.split(r"(?<=[.!?])\s+", page_text)
                     current_chunk = []
                     current_length = 0
@@ -602,7 +646,6 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
                                     chunk_id=len(chunks),
                                 )
                             )
-                            # ... (rest of the original chunking logic for overlap)
                             overlap_sentences = []
                             overlap_length = 0
                             for s in reversed(current_chunk):
@@ -627,10 +670,7 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
                         )
         return chunks
 
-    # Helper function to get the page number
     def _get_page_from_context(self, full_text, chart_description):
-        # This is a simplified example; you might need a more robust way to track pages
-        # if chart descriptions can span page breaks in the text.
         try:
             preceding_text = full_text.split(chart_description)[0]
             page_matches = re.findall(r"## Page (\d+)", preceding_text)
@@ -638,34 +678,45 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
                 return int(page_matches[-1])
         except:
             pass
-        return 0  # Default page number
+        return 0
 
     def index_document(
         self,
-        pdf_path: str,
+        file_path: str,
         chunk_size: int = 500,
         overlap: int = 100,
         progress_callback=None,
     ):
-        # Use the output_dir directly without creating subdirectories
-        # The calling code (Streamlit) already creates a unique directory
         file_output_dir = self.output_dir
+        file_ext = os.path.splitext(file_path)[1].lower()
 
-        print(f"Saving charts to: {file_output_dir}")
+        if file_ext == ".pdf":
+            markdown_text = self.extract_text_from_pdf(
+                file_path, file_output_dir, progress_callback
+            )
+        elif file_ext == ".docx":
+            markdown_text = self.extract_text_from_docx(
+                file_path, file_output_dir, progress_callback
+            )
+        elif file_ext == ".pptx":
+            markdown_text = self.extract_text_from_pptx(
+                file_path, file_output_dir, progress_callback
+            )
+        else:
+            raise ValueError(f"Unsupported file format: {file_ext}")
 
-        markdown_text = self.extract_text_from_pdf(
-            pdf_path, file_output_dir, progress_callback
-        )
-        print("\nChunking document...")
-        chunks = self.smart_chunk(markdown_text, pdf_path, chunk_size, overlap)
+        chunks = self.smart_chunk(markdown_text, file_path, chunk_size, overlap)
         self.chunks.extend(chunks)
-        print("Vectorizing chunks...")
+        if not chunks:
+            return
+
         chunk_texts = [chunk.text for chunk in chunks]
         embeddings = self.embedding_model.encode(chunk_texts, show_progress_bar=True)
+        if len(embeddings.shape) == 1:
+            embeddings = embeddings.reshape(1, -1)
         if self.index is None:
             self.index = faiss.IndexFlatL2(self.embedding_dim)
         self.index.add(np.array(embeddings).astype("float32"))
-        print(f"Indexed {len(chunks)} chunks from {pdf_path}\n")
 
     def search(self, query: str, top_k: int = 5) -> List[Tuple[Chunk, float]]:
         if self.index is None or len(self.chunks) == 0:
@@ -697,7 +748,7 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
         Answer:"""
         try:
             response = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
                 messages=[
                     {
                         "role": "system",
@@ -723,50 +774,4 @@ Describe this chart or diagram in complete detail. Include ALL data points, tren
                 "response": response.choices[0].message.content,
             }
         except Exception as e:
-            print(e)
             return {"error": str(e)}
-
-
-# --- Example Usage ---
-if __name__ == "__main__":
-    # CHOOSE YOUR DETECTOR: "heuristic", "yolo", or "tatr"
-    # Note: "yolo" and "tatr" will download pre-trained models on first run.
-    # The models used here are trained on tables, so they may detect tables
-    # as charts. For best results, fine-tune a model on your specific chart data.
-    CHART_DETECTOR_TO_USE = "yolo"  # <-- CHANGE THIS TO EXPERIMENT
-
-    try:
-        # Initialize RAG system with the chosen detector
-        rag = SmartRAG(chart_detector_model=CHART_DETECTOR_TO_USE)
-
-        pdf_path = (
-            "/path/to/your/document.pdf"  # <--- IMPORTANT: REPLACE with your PDF path
-        )
-
-        if os.path.exists(pdf_path):
-            rag.index_document(pdf_path, chunk_size=500, overlap=100)
-
-            response = rag.query(
-                "What is the trend in percentage of high intensity armed conflicts over the last decade?",
-                top_k=3,
-            )
-
-            print("=" * 80)
-            print("QUERY RESULTS")
-            print("=" * 80)
-            if "error" in response:
-                print(f"An error occurred: {response['error']}")
-            else:
-                print(f"\nQuestion: {response['question']}\n")
-                print("Retrieved Context:")
-                print(response["context"])
-                print(f"\nAnswer from groq:\n{response['response']}")
-        else:
-            print(f"PDF file not found: {pdf_path}")
-            print("Please provide a valid PDF path to test the RAG system.")
-
-    except (ImportError, ValueError) as e:
-        print(f"\nERROR: {e}")
-        print(
-            "Please ensure you have installed the required libraries for the selected model."
-        )

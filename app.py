@@ -1,15 +1,15 @@
 import streamlit as st
 from rag_enhanced import SmartRAG
+from vision_models import VisionModelFactory
 import os
 import time
 import tempfile
 from pathlib import Path
 from PIL import Image
 
-
 from custom_css import custom
 
-# Page config with custom theme
+# Page config
 st.set_page_config(
     page_title="Smart RAG Document Analyzer",
     page_icon="🧠",
@@ -17,11 +17,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for modern, professional look with animations
-st.markdown(
-    custom,
-    unsafe_allow_html=True,
-)
+# Custom CSS
+st.markdown(custom, unsafe_allow_html=True)
 
 # Initialize session state
 if "rag_pipeline" not in st.session_state:
@@ -32,81 +29,51 @@ if "temp_file_path" not in st.session_state:
     st.session_state.temp_file_path = None
 if "chart_dir" not in st.session_state:
     st.session_state.chart_dir = None
-
-# with st.sidebar:
-#     detector_model = st.radio(
-#         "Choose a Chart/Image detection model",
-#         ["yolo", "tatr"],
-#         captions=[
-#             "foduucom/table-detection-and-extraction",
-#             "microsoft/table-transformer-detection",
-#         ],
-#     )
-
-detector_model = "heuristic"
+if "selected_vision_model" not in st.session_state:
+    st.session_state.selected_vision_model = "Moondream2"
 
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
 
 
-def get_chart_output_dir(filename: str, model: str) -> Path:
+def get_chart_output_dir(filename: str) -> Path:
     """Create a unique output directory path for charts."""
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    # Use Path for cleaner path handling, stem removes extension
     safe_name = Path(filename).stem.replace(" ", "_")
-    dir_name = f"{timestamp}_{model}_{safe_name}"
+    dir_name = f"{timestamp}_combined_{safe_name}"
     return Path("potential_charts") / dir_name
-
-
-def find_actual_chart_directory() -> Path | None:
-    """Search for the most recently created chart directory in case SmartRAG created its own."""
-    potential_charts = Path("potential_charts")
-    if not potential_charts.exists():
-        return None
-
-    # Get all subdirectories sorted by modification time (most recent first)
-    subdirs = [d for d in potential_charts.iterdir() if d.is_dir()]
-    if not subdirs:
-        return None
-
-    # Return the most recently modified directory
-    return max(subdirs, key=lambda d: d.stat().st_mtime)
 
 
 def get_all_chart_images(chart_dir: Path | None) -> list[Path]:
     """Get all chart PNG files from the directory, sorted by page number."""
     if chart_dir is None or not chart_dir.exists():
         return []
-
-    # Use pathlib's glob - much cleaner than os.listdir
     chart_files = list(chart_dir.glob("*.png"))
-
-    # Sort by page number extracted from filename
     return sorted(chart_files, key=extract_page_number)
 
 
 def extract_page_number(filepath: Path) -> int:
-    """Extract page number from filename like 'page5_chart1.png'."""
+    """Extract page/slide number from filename."""
     import re
 
     match = re.search(r"page(\d+)", filepath.name)
-    return int(match.group(1)) if match else float("inf")
+    if match:
+        return int(match.group(1))
+    match = re.search(r"slide(\d+)", filepath.name)
+    if match:
+        return int(match.group(1))
+    return float("inf")
 
 
 def get_charts_for_page(chart_dir: Path, page: int) -> list[Path]:
     """Get all chart images for a specific page."""
-    if not chart_dir.exists():
+    if not chart_dir or not chart_dir.exists():
         return []
-
-    # Use glob patterns - more reliable than manual string matching
     patterns = [f"page{page}_chart*.png", f"page{page}_embedded*.png"]
-
     charts = []
     for pattern in patterns:
         charts.extend(chart_dir.glob(pattern))
-
-    # Remove duplicates while preserving order
     return list(dict.fromkeys(charts))
 
 
@@ -137,11 +104,83 @@ with st.sidebar:
     groq_api_key = os.environ.get("GROQ_API_KEY", "")
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # NEW: Vision Model Selection
+    st.markdown("### 🤖 Vision Model Selection")
+
+    available_models = VisionModelFactory.get_available_models()
+
+    # Model descriptions
+    model_descriptions = {
+        "Moondream2": "Fast & compact (1.6B params) - Best for speed",
+        "Qwen3-VL-2B": "Balanced performance (2B params) - Good accuracy",
+        "InternVL3.5-1B": "High accuracy (1B params) - Best for quality",
+    }
+
+    selected_model = st.selectbox(
+        "Choose a vision model",
+        available_models,
+        index=available_models.index(st.session_state.selected_vision_model),
+        format_func=lambda x: f"{x} - {model_descriptions.get(x, '')}",
+        help="Select which vision model to use for analyzing charts and images",
+    )
+
+    # Update session state if model changed
+    if selected_model != st.session_state.selected_vision_model:
+        st.session_state.selected_vision_model = selected_model
+        # Reset processing state if model changes
+        if st.session_state.processing_complete:
+            st.warning("⚠️ Vision model changed. Please re-process your document.")
+            st.session_state.processing_complete = False
+            st.session_state.rag_pipeline = None
+
+    st.markdown(f"**Selected:** {selected_model}")
+
+    # Show model info
+    with st.expander("ℹ️ Model Information"):
+        if selected_model == "Moondream2":
+            st.markdown(
+                """
+            **Moondream2**
+            - Performance: ~4 seconds per image description
+            - Parameters: ~1.6B
+            - Speed: ⚡⚡⚡ Very Fast
+            - Accuracy: ⭐⭐ Good
+            - Best for: Quick processing
+            - Memory: ~7GB
+            """
+            )
+        elif selected_model == "Qwen3-VL-2B":
+            st.markdown(
+                """
+            **Qwen3-VL-2B**
+            - Performance: ~40 seconds per image description
+            - Parameters: 2B
+            - Speed: ⚡⚡ Fast
+            - Accuracy: ⭐⭐⭐ Very Good
+            - Best for: Balanced use
+            - Memory: ~12GB
+            """
+            )
+        elif selected_model == "InternVL3.5-1B":
+            st.markdown(
+                """
+            **InternVL3.5-1B**
+            - Performance: ~ 28 seconds per image description
+            - Parameters: 1B
+            - Speed: ⚡ Moderate
+            - Accuracy: ⭐⭐⭐⭐ Excellent
+            - Best for: High accuracy
+            - Memory: ~12GB
+            """
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 📄 Upload Document")
 
     uploaded_file = st.file_uploader(
-        "Choose a PDF file",
-        type=["pdf"],
+        "Choose a file",
+        type=["pdf", "docx", "pptx"],
         label_visibility="collapsed",
     )
 
@@ -151,61 +190,47 @@ with st.sidebar:
             status_text = st.empty()
 
             try:
-                # Create output directory for charts FIRST
-                chart_dir = get_chart_output_dir(uploaded_file.name, detector_model)
+                chart_dir = get_chart_output_dir(uploaded_file.name)
                 chart_dir.mkdir(parents=True, exist_ok=True)
-
-                # Store as absolute path to ensure it's accessible
                 st.session_state.chart_dir = chart_dir.resolve()
 
-                # Save uploaded file temporarily
+                file_ext = os.path.splitext(uploaded_file.name)[1]
                 with tempfile.NamedTemporaryFile(
-                    delete=False, suffix=".pdf"
+                    delete=False, suffix=file_ext
                 ) as tmp_file:
                     tmp_file.write(uploaded_file.read())
                     st.session_state.temp_file_path = tmp_file.name
 
-                progress_bar.progress(25)
-                status_text.markdown("🔄 **Initializing Smart RAG system...**")
-                time.sleep(0.3)
-                status_text.markdown("📊 **Starting document analysis...**")
+                progress_bar.progress(10)
+                status_text.markdown(f"🔄 **Loading {selected_model} vision model...**")
                 time.sleep(0.3)
 
-                # Initialize RAG system with absolute path
+                progress_bar.progress(25)
+                status_text.markdown(
+                    "📊 **Starting document analysis with combined detection...**"
+                )
+                time.sleep(0.3)
+
+                # Initialize RAG with selected vision model
                 st.session_state.rag_pipeline = SmartRAG(
                     output_dir=str(st.session_state.chart_dir),
-                    chart_detector_model=detector_model,
+                    vision_model_name=selected_model,  # Pass the selected model
                 )
 
-                # Progress callback
                 def update_progress(current_page, total_pages):
                     progress = 25 + int((current_page / total_pages) * 65)
                     progress_bar.progress(progress)
                     status_text.markdown(
-                        f"📊 **Processing page {current_page}/{total_pages}...**"
+                        f"📊 **Processing page {current_page}/{total_pages} with {selected_model}...**"
                     )
                     time.sleep(0.1)
 
-                # Process document
                 st.session_state.rag_pipeline.index_document(
                     st.session_state.temp_file_path,
                     chunk_size=500,
                     overlap=100,
                     progress_callback=update_progress,
                 )
-
-                # IMPORTANT: After processing, check if SmartRAG created a subdirectory
-                # If your rag_enhanced.py still creates subdirectories, we need to find them
-                pdf_basename = Path(uploaded_file.name).stem
-                potential_subdir = st.session_state.chart_dir / pdf_basename
-
-                if potential_subdir.exists() and list(potential_subdir.glob("*.png")):
-                    # SmartRAG created a subdirectory - use it
-                    st.session_state.chart_dir = potential_subdir
-                    print(f"Charts found in subdirectory: {st.session_state.chart_dir}")
-                else:
-                    # Charts are in the main directory as expected
-                    print(f"Charts in main directory: {st.session_state.chart_dir}")
 
                 progress_bar.progress(90)
                 status_text.markdown("🔍 **Building search index...**")
@@ -215,50 +240,31 @@ with st.sidebar:
                 status_text.markdown("✅ **Processing complete!**")
                 st.session_state.processing_complete = True
 
-                # Debug: Print the directory we're checking
-                print(f"Looking for charts in: {st.session_state.chart_dir}")
-                print(f"Directory exists: {st.session_state.chart_dir.exists()}")
-
-                if st.session_state.chart_dir.exists():
-                    all_files = list(st.session_state.chart_dir.glob("*"))
-                    # print(f"All files in directory: {[f.name for f in all_files]}")
-
-                # Verify charts are in the expected location
                 actual_charts = get_all_chart_images(st.session_state.chart_dir)
-                print(f"Found {len(actual_charts)} chart images")
-
                 time.sleep(0.5)
 
-                # Show results
                 if actual_charts:
-                    status_text.markdown(f"📊 Found {len(actual_charts)} charts")
-                else:
-                    # If no charts found, check parent directory
-                    parent_charts = list(
-                        st.session_state.chart_dir.parent.glob("**/*.png")
+                    status_text.markdown(
+                        f"📊 Found {len(actual_charts)} charts (Combined TATR + Heuristic)"
                     )
-                    if parent_charts:
-                        status_text.markdown(
-                            f"⚠️ No charts in expected location. Found {len(parent_charts)} charts in parent directories. Check console for paths."
-                        )
-                        print(
-                            f"Charts found elsewhere: {[str(p) for p in parent_charts[:5]]}"
-                        )
-                    else:
-                        status_text.markdown(f"⚠️ No charts detected in document")
-                time.sleep(2)
+                else:
+                    status_text.markdown("⚠️ No charts detected in document")
 
+                time.sleep(2)
                 progress_bar.empty()
                 status_text.empty()
 
                 st.markdown(
-                    "<div class='success-message'>✨ Document processed successfully!</div>",
+                    f"<div class='success-message'>✨ Document processed successfully with {selected_model}!</div>",
                     unsafe_allow_html=True,
                 )
             except Exception as e:
                 progress_bar.empty()
                 status_text.empty()
                 st.error(f"❌ Error processing document: {str(e)}")
+                import traceback
+
+                print(traceback.format_exc())
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     st.markdown("---")
@@ -271,98 +277,77 @@ with st.sidebar:
             """
         **Optical Character Recognition Engine**
         
-        Tesseract is an open-source OCR engine that extracts text from images and scanned documents. 
+        Extracts text from images and scanned documents.
         
         **In this app:**
-        - Extracts text from charts and images embedded in PDFs
-        - Handles low-quality scans and non-native text
-        - Provides confidence scores for extracted text
+        - Extracts text from charts and images
+        - Handles low-quality scans
+        - Provides confidence scores
         """
         )
 
-    with st.expander("👁️ Moondream2 Vision Model"):
+    # NEW: Updated vision model expander
+    with st.expander("👁️ Vision Models (Switchable)"):
         st.markdown(
             """
-        **AI Vision Model for Chart Understanding**
+        **Multiple AI Vision Models Available**
         
-        Moondream2 is a compact vision-language model that can understand and describe visual content.
+        Choose from three different vision models:
         
-        **In this app:**
-        - Analyzes charts, graphs, and diagrams
-        - Extracts trends, data points, and insights
-        - Generates detailed descriptions of visual elements
-        - Runs locally on your device (MPS/CUDA/CPU)
+        **1. Moondream2:**
+        - Fastest processing speed
+        - Compact 1.6B parameter model
+        - Good for quick analysis
+        - Around 4 seconds per image
+        
+        **2. Qwen3-VL-2B:**
+        - Balanced speed and accuracy
+        - 2B parameters
+        - Excellent chart understanding
+        - Around 40 seconds per image
+        
+        **3. InternVL3.5-1B:**
+        - Best accuracy
+        - 1B parameters
+        - Superior for complex visuals
+        - Around 28 seconds per image
+        
+        **All models:**
+        - Analyze charts, graphs, and diagrams
+        - Extract trends and data points
+        - Generate detailed descriptions
+        - Run locally (MPS/CUDA/CPU)
         """
         )
-    with st.expander("📄 Table Transformer (TATR)"):
+
+    with st.expander("🎯 Combined Chart Detection"):
         st.markdown(
             """
-        **AI Model for Table and Structure Detection**
+        **Dual-Model Detection System**
 
-        TATR (Table Transformer) is a sophisticated model from Microsoft, built on the DETR (DEtection TRansformer) architecture. It excels at identifying the structure and location of tables within documents.
+        **1. Table Transformer (TATR):**
+        - AI-powered transformer model
+        - Excellent for structured content
 
-        **In this app:**
-        - Detects the precise location of tables and charts on a document page.
-        - Uses an object detection approach to draw bounding boxes around potential visual data.
-        - Is particularly effective at finding structured elements, which makes it a strong candidate for chart detection.
-        """
-        )
-    with st.expander("🎯 YOLOv8 Object Detection"):
-        st.markdown(
-            """
-        **Real-Time Object Detection Model**
+        **2. Heuristic Detection:**
+        - Grid-based analysis
+        - Catches edge cases
 
-        YOLO (You Only Look Once) is a state-of-the-art, real-time object detection system known for its incredible speed and accuracy. YOLOv8 is the latest iteration in this popular model family.
-
-        **In this app:**
-        - Scans the document page to instantly identify regions that look like charts or tables.
-        - Acts as a pluggable and highly efficient detector to locate visual data.
-        - Can be fine-tuned on custom datasets to recognize specific types of charts, offering a path for even greater accuracy.
+        **Combined Approach:**
+        - Runs both detectors
+        - Removes duplicates via IoU
+        - Maximum chart coverage
         """
         )
 
-    with st.expander("🤖 Groq + Llama 3.3"):
+    with st.expander("🤖 Groq + Llama 4"):
         st.markdown(
             """
         **Fast Language Model Inference**
         
-        Groq provides ultra-fast inference for large language models like Meta's Llama 3.3 70B.
-        
-        **In this app:**
-        - Generates accurate answers to your questions
-        - Synthesizes information from multiple sources
-        - Provides context-aware responses
-        - Runs at 750+ tokens/second
-        """
-        )
-
-    with st.expander("🔍 Sentence Transformers"):
-        st.markdown(
-            """
-        **Semantic Search & Embeddings**
-        
-        Creates dense vector representations of text for semantic similarity search.
-        
-        **In this app:**
-        - Converts text chunks into vector embeddings
-        - Enables semantic search (not just keyword matching)
-        - Finds relevant context for your questions
-        - Model: all-MiniLM-L6-v2
-        """
-        )
-
-    with st.expander("⚡ FAISS Vector Database"):
-        st.markdown(
-            """
-        **Efficient Similarity Search**
-        
-        Facebook AI Similarity Search - optimized library for fast vector search.
-        
-        **In this app:**
-        - Stores document embeddings efficiently
-        - Performs fast nearest-neighbor search
-        - Retrieves most relevant chunks in milliseconds
-        - Scales to millions of vectors
+        - Ultra-fast inference
+        - Context-aware responses
+        - 750+ tokens/second
         """
         )
 
@@ -372,9 +357,10 @@ with st.sidebar:
     st.markdown(
         """<div class='sidebarText'>
     - 📕 PDF Documents<br>
+    - 📝 Word Documents (.docx)<br>
+    - 📊 PowerPoint (.pptx)<br>
     - 🖼️ Scanned PDFs<br>
-    - 📊 Documents with Charts/Graphs<br>
-    - 📄 Text-heavy PDFs<br>
+    - 📊 Charts/Graphs<br>
     </div>
     """,
         unsafe_allow_html=True,
@@ -394,17 +380,20 @@ with st.sidebar:
 if not st.session_state.processing_complete:
     # Welcome screen
     st.markdown(
-        """
+        f"""
     <div style='text-align: center; padding: 4rem 2rem; background: rgba(255, 255, 255, 0.05); border-radius: 20px; backdrop-filter: blur(10px);'>
         <h2 style='font-size: 2rem; margin-bottom: 1rem;'>👋 Welcome to Smart RAG</h2>
         <p style='font-size: 1.2rem; color: #e0e0ff; margin-bottom: 2rem;'>
-            Upload a PDF to unlock advanced document analysis with AI
+            Upload a document to unlock advanced AI analysis
+        </p>
+        <p style='font-size: 1rem; color: #b0b0ff; margin-bottom: 2rem;'>
+            Currently using: <strong>{st.session_state.selected_vision_model}</strong> vision model
         </p>
         <div style='display: flex; justify-content: center; gap: 3rem; margin-top: 3rem; flex-wrap: wrap;'>
             <div class='metric-card' style='min-width: 200px;'>
                 <div style='font-size: 3rem; margin-bottom: 0.5rem;'>📊</div>
                 <div style='font-weight: 600; font-size: 1.1rem;'>Chart Understanding</div>
-                <div style='font-size: 0.9rem; color: #b0b0ff; margin-top: 0.5rem;'>AI vision analyzes graphs</div>
+                <div style='font-size: 0.9rem; color: #b0b0ff; margin-top: 0.5rem;'>3 Vision Models Available</div>
             </div>
             <div class='metric-card' style='min-width: 200px;'>
                 <div style='font-size: 3rem; margin-bottom: 0.5rem;'>🔍</div>
@@ -422,6 +411,11 @@ if not st.session_state.processing_complete:
         unsafe_allow_html=True,
     )
 else:
+    # Show which model was used
+    if st.session_state.rag_pipeline:
+        model_name = st.session_state.rag_pipeline.vision_model_name
+        # st.info(f"📊 Document processed with **{model_name}** vision model")
+
     # ============================================================================
     # QUESTION INTERFACE
     # ============================================================================
@@ -447,18 +441,15 @@ else:
                     answer = query_result["response"]
                     results = query_result["results"]
 
-                    # Collect all chart images referenced in results
                     chart_images = []
                     for result in results:
                         if "[CHART DESCRIPTION" in result["text"]:
                             page = result["page"]
-                            # Use utility function to get charts for this page
                             page_charts = get_charts_for_page(
                                 st.session_state.chart_dir, page
                             )
                             chart_images.extend(page_charts)
 
-                    # Remove duplicates while preserving order
                     chart_images = list(dict.fromkeys(chart_images))
 
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -472,24 +463,27 @@ else:
                         unsafe_allow_html=True,
                     )
 
-                    # Display images used in response
                     if chart_images:
                         st.markdown("<br>", unsafe_allow_html=True)
                         with st.expander(
-                            f"🖼️ Images Used in Response ({len(chart_images)})"
+                            f"🖼️ Image Descriptions Used in Response ({len(chart_images)})"
                         ):
                             for img_path in chart_images:
-                                # Get description from RAG pipeline
-                                description = st.session_state.rag_pipeline.chart_descriptions.get(
-                                    img_path.name, img_path.name
-                                )
-                                st.image(
-                                    str(img_path),
-                                    caption=description,
-                                    width="stretch",
-                                )
+                                if st.session_state.rag_pipeline.chart_descriptions:
+                                    description = st.session_state.rag_pipeline.chart_descriptions.get(
+                                        img_path.name, img_path.name
+                                    )
+                                else:
+                                    description = img_path.name
+                                cols = st.columns([1, 2, 1])
+                                with cols[1]:
+                                    st.image(
+                                        str(img_path),
+                                        caption=description,
+                                        width="content",
+                                        # width="stretch",
+                                    )
 
-                    # Display sources
                     if results:
                         st.markdown("<br>", unsafe_allow_html=True)
                         st.markdown("### 📚 Sources Used")
@@ -508,6 +502,9 @@ else:
 
             except Exception as e:
                 st.error(f"❌ Error during query: {str(e)}")
+                import traceback
+
+                print(traceback.format_exc())
 
     # ============================================================================
     # CHART BROWSER
@@ -516,11 +513,9 @@ else:
     chart_files = get_all_chart_images(st.session_state.chart_dir)
 
     if chart_files:
-        # Initialize chart browser index
         if "chart_browser_idx" not in st.session_state:
             st.session_state.chart_browser_idx = 0
 
-        # Reset index if files changed
         if (
             "cached_chart_files" not in st.session_state
             or st.session_state.cached_chart_files != chart_files
@@ -533,21 +528,25 @@ else:
 
         st.divider()
         with st.expander(
-            "### 📊 Detected Charts and Descriptions (Entire Doc)", expanded=False
+            f"### 📊 Detected Charts (Combined TATR + Heuristic) - {total} total",
+            expanded=True,
         ):
             st.markdown(
-                "<p style='color: #b0b0ff;'>Charts extracted from your document</p>",
+                f"<p style='color: #b0b0ff;'>Charts analyzed using <strong>{st.session_state.rag_pipeline.vision_model_name}</strong></p>",
                 unsafe_allow_html=True,
             )
 
-            # Current chart
             chart_path = chart_files[idx]
-            description = st.session_state.rag_pipeline.chart_descriptions.get(
-                chart_path.name, chart_path.name
-            )
+
+            if st.session_state.rag_pipeline.chart_descriptions:
+                description = st.session_state.rag_pipeline.chart_descriptions.get(
+                    chart_path.name, chart_path.name
+                )
+            else:
+                description = chart_path.name
+
             page_number = extract_page_number(chart_path)
 
-            # Navigation
             col1, col2, col3 = st.columns([1, 3, 1])
             with col1:
                 if st.button("⬅️ Previous", disabled=(total <= 1)):
@@ -559,7 +558,7 @@ else:
                 )
                 st.markdown(f"#### Page {page_number}")
                 st.image(str(chart_path), width="stretch")
-                st.html(f"<small>{description}</small>")
+                st.markdown(f"<small>{description}</small>", unsafe_allow_html=True)
             with col3:
                 if st.button("Next ➡️", disabled=(total <= 1)):
                     st.session_state.chart_browser_idx = (idx + 1) % total
