@@ -9,41 +9,113 @@ import traceback
 from src.core.rag_pipeline import SmartRAG
 from src.vision.vision_models import VisionModelFactory
 from .ui_utils import get_chart_output_dir, get_all_chart_images
+from src.utils.db_utils import DatabaseManager
 
 
 def display_sidebar():
-    """
-    Renders the entire sidebar, including model selection, file uploading,
-    and informational sections.
-    """
+    """Renders the entire sidebar, including session loading."""
     with st.sidebar:
         st.markdown("<br>", unsafe_allow_html=True)
-
-        # Check for API key
         groq_api_key = os.environ.get("GROQ_API_KEY", "")
         if not groq_api_key:
-            st.warning(
-                "GROQ_API_KEY environment variable not set. Please add it to proceed."
-            )
+            st.warning("GROQ_API_KEY not set.")
             st.stop()
 
-        display_vision_model_selection()
-        display_document_uploader(groq_api_key)
+        # Initialize DB Manager in session state if it doesn't exist
+        if "db_manager" not in st.session_state:
+            st.session_state.db_manager = DatabaseManager()
+
+        display_session_loader()
+
+        # Show the uploader only for new sessions
+        if st.session_state.get("active_document_id") is None:
+            display_vision_model_selection()
+            display_document_uploader(groq_api_key)
 
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.markdown("---")
         display_technology_explanations()
-
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
         display_supported_formats_and_footer()
+
+
+def display_session_loader():
+    """Displays UI for loading past document processing sessions."""
+    st.markdown("### 🗂️ Load Session")
+
+    # Get list of past documents from the database
+    past_documents = st.session_state.db_manager.get_all_documents()
+
+    # Create options for the selectbox
+    # Format: "filename (timestamp)" -> doc_id
+    doc_options = {
+        f"{filename} ({ts})": doc_id for doc_id, filename, ts in past_documents
+    }
+    options_list = ["✨ Start New Session"] + list(doc_options.keys())
+
+    selected_option = st.selectbox("Choose a previous document", options=options_list)
+
+    if selected_option != "✨ Start New Session":
+        if st.button("Load Selected Session", use_container_width=True):
+            doc_id_to_load = doc_options[selected_option]
+            load_session(doc_id_to_load)
+    elif st.session_state.get("active_document_id") is not None:
+        if st.button("End Current Session", use_container_width=True):
+            # Reset all relevant session state variables
+            st.session_state.processing_complete = False
+            st.session_state.rag_pipeline = None
+            st.session_state.active_document_id = None
+            st.session_state.chat_history = []
+            st.rerun()
+
+
+def load_session(doc_id: int):
+    """Handles the logic of loading a past session from the database."""
+    with st.spinner(f"Loading session for document ID {doc_id}..."):
+        try:
+            doc_data = st.session_state.db_manager.get_document_by_id(doc_id)
+            if not doc_data:
+                st.error("Could not find session data.")
+                return
+
+            # Re-initialize the RAG pipeline with the saved vision model
+            rag_pipeline = SmartRAG(
+                output_dir=doc_data["chart_dir"],
+                vision_model_name=doc_data["vision_model_used"],
+            )
+
+            # Load the saved state (FAISS index and chunks)
+            rag_pipeline.load_state(
+                doc_data["faiss_index_path"], doc_data["chunks_path"]
+            )
+
+            # Restore state
+            st.session_state.rag_pipeline = rag_pipeline
+            st.session_state.processing_complete = True
+            st.session_state.active_document_id = doc_id
+            st.session_state.chart_dir = Path(doc_data["chart_dir"])
+            st.session_state.selected_vision_model = doc_data["vision_model_used"]
+            st.session_state.rag_pipeline.chart_descriptions = doc_data[
+                "chart_descriptions"
+            ]
+
+            st.success(
+                f"Successfully loaded session for '{doc_data['original_filename']}'."
+            )
+            time.sleep(1)
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Failed to load session: {e}")
+            traceback.print_exc()
 
 
 def display_vision_model_selection():
     """
     Handles the UI for selecting the vision model and displaying its information.
     """
-    st.markdown("### 🤖 Vision Model Selection")
+    st.markdown("### Vision Model Selection")
 
     available_models = VisionModelFactory.get_available_models()
     model_descriptions = {
@@ -178,8 +250,31 @@ def process_document(uploaded_file):
             progress_callback=update_progress,
         )
 
-        progress_bar.progress(95, text="Building search index...")
-        time.sleep(0.5)
+        progress_bar.progress(95, text="Saving processed state...")
+
+        # A new document was processed, so get a new ID from the DB
+        # Note: We need to create the DB record *before* saving state to get the ID
+        doc_id = st.session_state.db_manager.add_document_record(
+            filename=uploaded_file.name,
+            vision_model=st.session_state.selected_vision_model,
+            chart_dir=str(st.session_state.chart_dir),
+            faiss_path="",  # Placeholder
+            chunks_path="",  # Placeholder
+            chart_descriptions=st.session_state.rag_pipeline.chart_descriptions,
+        )
+        st.session_state.active_document_id = doc_id
+
+        # Save the FAISS index and chunks using the new doc_id
+        faiss_path, chunks_path = st.session_state.rag_pipeline.save_state(doc_id)
+
+        # Now update the record with the correct paths
+        st.session_state.db_manager.conn.execute(
+            "UPDATE documents SET faiss_index_path = ?, chunks_path = ? WHERE id = ?",
+            (faiss_path, chunks_path, doc_id),
+        )
+        st.session_state.db_manager.conn.commit()
+
+        progress_bar.progress(100, text="Processing Complete!")
 
         progress_bar.progress(100, text="Processing Complete!")
         status_text.markdown("✅ **Document processing complete!**")

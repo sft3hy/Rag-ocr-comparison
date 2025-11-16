@@ -9,7 +9,7 @@ from src.core.chunking import smart_chunk
 from src.core.document_parser import DocumentParser
 from src.services.groq_client import GroqClient
 from src.vision.vision_models import VisionModelFactory
-
+from src.core.persistence import save_rag_state, load_rag_state
 from src.core.data_models import Chunk
 
 
@@ -69,6 +69,16 @@ class SmartRAG:
         self.index = None
         self.chunks: List[Chunk] = []
         self.chart_descriptions: Dict[str, str] = {}
+
+    def save_state(self, doc_id: int):
+        """Saves the current index and chunks to disk for a given doc_id."""
+        if self.index is None or not self.chunks:
+            raise ValueError("Cannot save state without a built index and chunks.")
+        return save_rag_state(doc_id, self.index, self.chunks)
+
+    def load_state(self, faiss_path: str, chunks_path: str):
+        """Loads an index and chunks from disk into the current object."""
+        self.index, self.chunks = load_rag_state(faiss_path, chunks_path)
 
     def index_document(
         self,

@@ -208,3 +208,7 @@ __marimo__/
 
 .DS_Store
 potential_charts
+
+*.db
+*.pkl
+*.faiss

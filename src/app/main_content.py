@@ -7,15 +7,30 @@ from .ui_utils import get_all_chart_images, extract_page_number, get_charts_for_
 
 
 def display_main_content():
-    """
-    Controls the display of the main content area.
-    Shows a welcome screen initially, and the Q&A interface after processing.
-    """
+    """Controls the display of the main content area."""
     if not st.session_state.get("processing_complete", False):
         display_welcome_screen()
     else:
+        # Load and display chat history for the active document
+        display_chat_history()
         display_qa_interface()
         display_chart_browser()
+
+
+def display_chat_history():
+    """Loads and displays the Q&A history for the current session."""
+    doc_id = st.session_state.get("active_document_id")
+    if doc_id:
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = (
+                st.session_state.db_manager.get_queries_for_document(doc_id)
+            )
+
+        for interaction in st.session_state.chat_history:
+            with st.chat_message("user"):
+                st.write(interaction["question"])
+            with st.chat_message("assistant"):
+                st.write(interaction["response"])
 
 
 def display_welcome_screen():
@@ -56,82 +71,80 @@ def display_welcome_screen():
 
 
 def display_qa_interface():
-    """
-    Displays the main question-answering text input and results area.
-    """
-    question = st.text_input(
-        "question",
-        label_visibility="hidden",
-        placeholder="💬 Ask a question about your document...",
-    )
+    """Displays the Q&A input and handles new queries."""
+    question = st.chat_input("Ask a question about your document...")
 
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        ask_button = st.button("🎯 Get Answer", use_container_width=True)
+    if question:
+        doc_id = st.session_state.get("active_document_id")
+        if not doc_id:
+            st.error("No active document session. Please start a new session.")
+            return
 
-    if ask_button and question:
-        with st.spinner("🤔 Analyzing document and generating answer..."):
-            try:
-                query_result = st.session_state.rag_pipeline.query(question, top_k=5)
+        with st.chat_message("user"):
+            st.write(question)
 
-                if "error" in query_result:
-                    st.error(f"❌ Error: {query_result['error']}")
-                else:
-                    answer = query_result["response"]
-                    results = query_result["results"]
-
-                    # Find all unique charts related to the source documents
-                    chart_images = []
-                    for result in results:
-                        if "[CHART DESCRIPTION" in result["text"]:
-                            page = result["page"]
-                            print(page)
-                            page_charts = get_charts_for_page(
-                                st.session_state.chart_dir, page
-                            )
-                            print(page_charts)
-                            chart_images.extend(page_charts)
-                    chart_images = list(
-                        dict.fromkeys(chart_images)
-                    )  # Remove duplicates
-
-                    # Display the answer
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown(
-                        f"<div class='answer-container'>"
-                        f"<h3 style='margin-top: 0;'>💡 Answer</h3>"
-                        f"<p style='font-size: 1.1rem; line-height: 1.6;'>{answer}</p>"
-                        f"</div>",
-                        unsafe_allow_html=True,
+        with st.chat_message("assistant"):
+            with st.spinner("🤔 Analyzing..."):
+                try:
+                    query_result = st.session_state.rag_pipeline.query(
+                        question, top_k=5
                     )
+                    if "error" in query_result:
+                        st.error(f"Error: {query_result['error']}")
+                    else:
+                        answer = query_result["response"]
+                        results = query_result["results"]
 
-                    # Display related charts
-                    if chart_images:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        with st.expander(f"🖼️ Related Charts ({len(chart_images)})"):
-                            cols = st.columns([1, 2, 1])
-                            for img_path in chart_images:
-                                description = st.session_state.rag_pipeline.chart_descriptions.get(
-                                    img_path.name, "Chart"
-                                )
-                                with cols[1]:
-                                    st.image(str(img_path), caption=description)
+                        st.write(answer)  # Display the answer
 
-                    # Display sources
-                    if results:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown("### 📚 Sources Used in Response")
-                        for idx, result in enumerate(results, 1):
-                            relevance_score = (1 / (1 + result["score"])) * 100
-                            badge_html = f"📄 Page {result['page']} &nbsp; • &nbsp; ✨ Relevance: {relevance_score:.2f}%"
-                            expander_label = f"Source {idx}: {badge_html}"
+                        # Save the interaction to the database
+                        st.session_state.db_manager.add_query_record(
+                            doc_id=doc_id,
+                            question=question,
+                            response=answer,
+                            sources=results,
+                        )
+                        # Update chat history in session state
+                        st.session_state.chat_history.append(
+                            {"question": question, "response": answer}
+                        )
 
-                            with st.expander(expander_label):
-                                st.markdown(result["text"])
+                        # Find and display related charts and sources in an expander
+                        display_query_sources(results)
 
-            except Exception as e:
-                st.error(f"❌ An unexpected error occurred during the query: {str(e)}")
-                print(traceback.format_exc())
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {str(e)}")
+                    traceback.print_exc()
+
+
+def display_query_sources(results):
+    """Displays the sources and related charts for a query response."""
+    chart_images = []
+    for result in results:
+        if "[CHART DESCRIPTION" in result["text"]:
+            page = result["page"]
+            page_charts = get_charts_for_page(st.session_state.chart_dir, page)
+            chart_images.extend(page_charts)
+    chart_images = list(dict.fromkeys(chart_images))
+
+    with st.expander("📚 View Sources and Related Charts"):
+        if chart_images:
+            st.markdown("##### Related Charts")
+            for img_path in chart_images:
+                description = st.session_state.rag_pipeline.chart_descriptions.get(
+                    img_path.name, "Chart"
+                )
+                st.image(str(img_path), caption=description)
+            st.divider()
+
+        if results:
+            st.markdown("##### Text Sources")
+            for idx, result in enumerate(results, 1):
+                relevance_score = (1 / (1 + result["score"])) * 100
+                st.markdown(
+                    f"**Source {idx} (Page {result['page']})** - Relevance: {relevance_score:.2f}%"
+                )
+                st.info(result["text"])
 
 
 def display_chart_browser():
