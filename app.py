@@ -87,10 +87,10 @@ with col2:
         "<h1 style='text-align: center;'>🧠 Smart RAG Document Analyzer</h1>",
         unsafe_allow_html=True,
     )
-    st.markdown(
-        "<p style='text-align: center; color: #e0e0ff; font-size: 1.2rem; margin-top: -1rem;'>AI-powered document analysis with OCR and vision understanding</p>",
-        unsafe_allow_html=True,
-    )
+    # st.markdown(
+    #     "<p style='text-align: center; color: #e0e0ff; font-size: 1.2rem; margin-top: -1rem;'>AI-powered document analysis with OCR and vision understanding</p>",
+    #     unsafe_allow_html=True,
+    # )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -203,19 +203,20 @@ with st.sidebar:
 
                 progress_bar.progress(10)
                 status_text.markdown(f"🔄 **Loading {selected_model} vision model...**")
-                time.sleep(0.3)
+                # time.sleep(0.3)
 
                 progress_bar.progress(25)
                 status_text.markdown(
                     "📊 **Starting document analysis with combined detection...**"
                 )
-                time.sleep(0.3)
+                # time.sleep(0.3)
 
                 # Initialize RAG with selected vision model
                 st.session_state.rag_pipeline = SmartRAG(
                     output_dir=str(st.session_state.chart_dir),
                     vision_model_name=selected_model,  # Pass the selected model
                 )
+                print("right here")
 
                 def update_progress(current_page, total_pages):
                     progress = 25 + int((current_page / total_pages) * 65)
