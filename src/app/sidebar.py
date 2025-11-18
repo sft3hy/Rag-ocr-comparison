@@ -55,7 +55,6 @@ def display_session_loader():
     options_list = ["✨ Start New Session"] + list(doc_options.keys())
 
     selected_option = st.selectbox("Choose a previous document", options=options_list)
-    print(st.session_state.get("active_document_id"))
     if selected_option != "✨ Start New Session":
         if st.button("Load Selected Session", width="stretch"):
             doc_id_to_load = doc_options[selected_option]

@@ -381,7 +381,7 @@ def display_chart_browser():
 
         # --- Thumbnail Navigation (Optional - for quick browsing) ---
         if total_charts > 1:
-            st.markdown("---")
+            # st.markdown("---")
             st.subheader("🖼️ Quick Navigation")
 
             # Show thumbnails in a scrollable row

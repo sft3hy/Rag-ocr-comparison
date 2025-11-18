@@ -8,13 +8,13 @@ It addresses the critical need of extracting insights from data-rich reports, pr
 
 ## 2. Key Features
 
-*   **Advanced Chart & Image Analysis**: Utilizes local, privacy-preserving Vision Models (e.g., Moondream2, Qwen3-VL) to interpret charts, graphs, and images within documents. It extracts trends, data points, and key insights from visuals.
+*   **Advanced Chart & Image Analysis**: Utilizes local, privacy-preserving Vision Models (e.g., [Moondream2](https://huggingface.co/vikhyatk/moondream2), [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct)) to interpret charts, graphs, and images within documents. It extracts trends, data points, and key insights from visuals.
 *   **Comprehensive Document Support**: Ingests and understands various enterprise formats, including PDF (`.pdf`), Microsoft Word (`.docx`), and PowerPoint (`.pptx`).
 *   **Intelligent Content Chunking**: Employs a "smart chunking" strategy that preserves the semantic integrity of the content. It ensures that related pieces of information, especially text and its corresponding chart descriptions, are kept together for better context.
 *   **Dual-Method Chart Detection**: Maximizes accuracy by using a two-pronged approach to find visuals:
-    *   **Microsoft TATR (Table Transformer)**: An AI model that excels at identifying the structure of tables and charts.
+    *   **[Microsoft TATR (Table Transformer)](https://huggingface.co/docs/transformers/main/en/model_doc/table-transformer)**: An AI model that excels at identifying the structure of tables and charts.
     *   **Heuristic Detection**: A rules-based algorithm that analyzes pixel data to find charts that machine learning models might miss.
-*   **High-Speed, Accurate Search**: Leverages **FAISS (Facebook AI Similarity Search)**, a powerful vector database, to perform lightning-fast searches and find the most relevant information to answer user queries.
+*   **High-Speed, Accurate Search**: Leverages **[FAISS (Facebook AI Similarity Search)](https://github.com/facebookresearch/faiss)**, a powerful vector database, to perform lightning-fast searches and find the most relevant information to answer user queries.
 *   **Interactive User Interface**: A user-friendly web interface built with Streamlit allows users to easily upload documents, manage sessions, and interact with the AI in a chat-based format.
 
 ## 3. How It Works: The RAG Pipeline
@@ -32,7 +32,7 @@ The application follows a systematic process to convert a raw document into a se
 
 *   **Document Processing**: PyMuPDF (fitz), `python-docx`, `python-pptx`
 *   **Chart/Image Detection**: Microsoft TATR (Table Transformer), Heuristic Algorithms
-*   **Vision Models**: Moondream2, Qwen3-VL-2B, InternVL3.5-1B (run locally)
+*   **Vision Models**: [Moondream2](https://huggingface.co/vikhyatk/moondream2), Qwen3-VL-2B, InternVL3.5-1B (run locally)
 *   **Text Embedding**: Sentence-Transformers
 *   **Vector Storage & Search**: FAISS (Facebook AI Similarity Search)
 *   **Chunking Strategy**: Custom "Smart Chunking" logic
