@@ -1,110 +1,72 @@
-# RAG Pipeline: OCR vs Non-OCR Comparison
+# Smart RAG Document Analyzer
 
-A simplified RAG pipeline to test whether OCR improves retrieval abilities on documents.
+## 1. High-Level Overview
 
-## Prerequisites
+**Smart RAG Document Analyzer** is an advanced tool designed to intelligently understand and answer questions about complex documents. Unlike simple text search, this application can comprehend content within tables, charts, and images, providing users with accurate, context-aware answers.
 
-### 1. Install Tesseract OCR
+It addresses the critical need of extracting insights from data-rich reports, presentations, and technical documents that mix text with complex visuals. By leveraging a sophisticated AI pipeline, it saves significant time and effort in document analysis.
 
-**macOS:**
-```bash
-brew install tesseract
-```
+## 2. Key Features
 
-### 2. Install Poppler (for PDF to image conversion)
+*   **Advanced Chart & Image Analysis**: Utilizes local, privacy-preserving Vision Models (e.g., Moondream2, Qwen3-VL) to interpret charts, graphs, and images within documents. It extracts trends, data points, and key insights from visuals.
+*   **Comprehensive Document Support**: Ingests and understands various enterprise formats, including PDF (`.pdf`), Microsoft Word (`.docx`), and PowerPoint (`.pptx`).
+*   **Intelligent Content Chunking**: Employs a "smart chunking" strategy that preserves the semantic integrity of the content. It ensures that related pieces of information, especially text and its corresponding chart descriptions, are kept together for better context.
+*   **Dual-Method Chart Detection**: Maximizes accuracy by using a two-pronged approach to find visuals:
+    *   **Microsoft TATR (Table Transformer)**: An AI model that excels at identifying the structure of tables and charts.
+    *   **Heuristic Detection**: A rules-based algorithm that analyzes pixel data to find charts that machine learning models might miss.
+*   **High-Speed, Accurate Search**: Leverages **FAISS (Facebook AI Similarity Search)**, a powerful vector database, to perform lightning-fast searches and find the most relevant information to answer user queries.
+*   **Interactive User Interface**: A user-friendly web interface built with Streamlit allows users to easily upload documents, manage sessions, and interact with the AI in a chat-based format.
 
-**macOS:**
-```bash
-brew install poppler
-```
+## 3. How It Works: The RAG Pipeline
 
-### 3. Get Groq API Key
-1. Sign up at https://console.groq.com
-2. Create an API key from the dashboard
+The application follows a systematic process to convert a raw document into a searchable knowledge base.
 
-## Installation
+1.  **Ingestion & Parsing**: The user uploads a document. The system identifies the file type and begins parsing.
+2.  **Visual Detection & Analysis**: It scans each page for charts and images using both Microsoft TATR and heuristic methods. Detected visuals are sent to a local Vision AI model, which generates detailed text descriptions.
+3.  **Markdown Conversion**: The entire document—including the original text and the new AI-generated chart descriptions—is converted into a unified Markdown format. This preserves the document's structure and makes it easy to process.
+4.  **Smart Chunking**: The Markdown content is broken down into small, semantically related "chunks." This method ensures that important context is not lost by splitting a paragraph or separating a chart's description from its data.
+5.  **Embedding & Indexing**: Each chunk is converted into a numerical representation (an "embedding") using an advanced sentence-transformer model. These embeddings are stored in a **FAISS** index, which is highly optimized for fast similarity searches.
+6.  **Query & Synthesis**: When a user asks a question, the system searches the FAISS index to find the most relevant chunks of text. This context is then provided to a powerful Large Language Model (LLM) via the Groq API, which synthesizes a concise and accurate answer based *only* on the information from the document.
 
-1. Create a virtual environment:
-```bash
-python -m venv venv
-source venv/bin/activate  # On macOS/Linux
-```
+## 4. Core Technologies
 
-2. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
+*   **Document Processing**: PyMuPDF (fitz), `python-docx`, `python-pptx`
+*   **Chart/Image Detection**: Microsoft TATR (Table Transformer), Heuristic Algorithms
+*   **Vision Models**: Moondream2, Qwen3-VL-2B, InternVL3.5-1B (run locally)
+*   **Text Embedding**: Sentence-Transformers
+*   **Vector Storage & Search**: FAISS (Facebook AI Similarity Search)
+*   **Chunking Strategy**: Custom "Smart Chunking" logic
+*   **LLM for Q&A**: Groq API (Llama 4)
+*   **Application Framework**: Streamlit
 
-## Usage
+## 5. Project Structure
 
-1. Set your Groq API key (optional - can also enter in the UI):
-```bash
-export GROQ_API_KEY='your-api-key-here'
-```
-
-2. Run the Streamlit app:
-```bash
-streamlit run app.py
-```
-
-3. In the web interface:
-   - Enter your Groq API key (if not set as environment variable)
-   - Upload a PDF or image document
-   - Click "Process Document"
-   - Ask questions in either tab to compare OCR vs non-OCR results
-
-## How It Works
-
-### Without OCR (Tab 1)
-- Extracts text directly from PDFs using PyPDF2
-- Works well for PDFs with embedded text
-- Faster processing
-- May fail on scanned documents or images
-
-### With OCR (Tab 2)
-- Converts PDF pages to images
-- Uses Tesseract OCR to extract text
-- Works on scanned documents and images
-- Slower but more versatile
-
-### RAG Pipeline
-1. **Chunking**: Splits text into 500-word chunks
-2. **Vectorization**: Uses TF-IDF for simple vector embeddings
-3. **Retrieval**: Finds top 3 most relevant chunks using cosine similarity
-4. **Generation**: Sends context + question to Groq's LLaMA model for answer
-
-## Test Documents
-
-For best comparison results, try:
-- **Text-based PDFs**: Should work well in both tabs
-- **Scanned PDFs**: Should only work well with OCR enabled
-- **Images with text**: Only work with OCR enabled
-
-## File Structure
+The project is organized into a modular structure to separate concerns, making it maintainable and scalable.
 
 ```
-.
-├── app.py              # Streamlit frontend
-├── rag_pipeline.py     # RAG backend logic
-├── requirements.txt    # Python dependencies
-└── README.md          # This file
+/
+├── data/                  # Stores persistent data like indexes, chunks, and logs
+│   ├── chunks/
+│   ├── faiss_indexes/
+│   └── file_steps/
+├── potential_charts/      # Output directory for extracted chart/image files
+├── src/                   # Main source code
+│   ├── app/               # Streamlit UI components (sidebar, main content)
+│   ├── core/              # Core RAG pipeline logic (parsing, chunking, indexing)
+│   ├── services/          # Clients for external APIs (e.g., Groq)
+│   ├── utils/             # Helper utilities (chart detection, database management)
+│   └── vision/            # Vision model integrations
+├── static/                # Static assets like CSS
+├── main.py                # Entry point to run the Streamlit application
+└── README.md              # This file
 ```
 
-## Troubleshooting
+## 6. Getting Started
 
-**"Tesseract not found" error:**
-- Verify installation: `which tesseract`
-- Add to PATH if needed
-
-**Groq API errors:**
-- Check your API key is valid
-- Verify you have credits available
-
-**PDF processing fails:**
-- Ensure poppler is installed: `which pdftoimage`
-
-## Notes
-
-- This is a simplified pipeline using TF-IDF for vectors (not true embeddings)
-- For production use, consider using proper embedding models (OpenAI, Sentence Transformers)
-- Chunk size and retrieval parameters can be adjusted in `rag_pipeline.py`
+1.  **Set Up Environment**: Ensure all dependencies from `requirements.txt` are installed.
+2.  **API Keys**: Set the `GROQ_API_KEY` environment variable.
+3.  **Run Application**: Execute the following command in your terminal:
+    ```bash
+    streamlit run main.py
+    ```
+4.  **Interact**: Open the provided URL in your browser to start analyzing documents.

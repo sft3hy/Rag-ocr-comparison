@@ -55,13 +55,13 @@ def display_session_loader():
     options_list = ["✨ Start New Session"] + list(doc_options.keys())
 
     selected_option = st.selectbox("Choose a previous document", options=options_list)
-
+    print(st.session_state.get("active_document_id"))
     if selected_option != "✨ Start New Session":
-        if st.button("Load Selected Session", use_container_width=True):
+        if st.button("Load Selected Session", width="stretch"):
             doc_id_to_load = doc_options[selected_option]
             load_session(doc_id_to_load)
-    elif st.session_state.get("active_document_id") is not None:
-        if st.button("End Current Session", use_container_width=True):
+    else:
+        if st.button("Start New Session", width="stretch"):
             # Reset all relevant session state variables
             st.session_state.processing_complete = False
             st.session_state.rag_pipeline = None
@@ -83,6 +83,7 @@ def load_session(doc_id: int):
             rag_pipeline = SmartRAG(
                 output_dir=doc_data["chart_dir"],
                 vision_model_name=doc_data["vision_model_used"],
+                load_vision=False,
             )
 
             # Load the saved state (FAISS index and chunks)
@@ -195,7 +196,7 @@ def display_document_uploader(groq_api_key: str):
     )
 
     if uploaded_file and groq_api_key:
-        if st.button("🚀 Process Document", use_container_width=True):
+        if st.button("🚀 Process Document", width="stretch"):
             process_document(uploaded_file)
 
 

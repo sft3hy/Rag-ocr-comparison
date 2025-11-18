@@ -212,3 +212,5 @@ potential_charts
 *.db
 *.pkl
 *.faiss
+*.json
+*.txt
