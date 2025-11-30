@@ -28,7 +28,7 @@ def display_sidebar():
         display_session_loader()
 
         # Show the uploader only for new sessions
-        if st.session_state.get("active_document_id") is None:
+        if not st.session_state.get("active_document_ids"):
             display_vision_model_selection()
             display_document_uploader(groq_api_key)
 
@@ -44,29 +44,93 @@ def display_session_loader():
     """Displays UI for loading past document processing sessions."""
     st.markdown("### 🗂️ Load Session")
 
-    # Get list of past documents from the database
-    past_documents = st.session_state.db_manager.get_all_documents()
+    # Get list of past sessions from the database
+    past_sessions = st.session_state.db_manager.get_all_sessions()
 
     # Create options for the selectbox
-    # Format: "filename (timestamp)" -> doc_id
-    doc_options = {
-        f"{filename} ({ts})": doc_id for doc_id, filename, ts in past_documents
-    }
-    options_list = ["✨ Start New Session"] + list(doc_options.keys())
+    # Format: "session_name (timestamp) - X docs" -> session_id
+    session_options = {}
+    for session_id, session_name, timestamp, doc_count in past_sessions:
+        doc_text = "doc" if doc_count == 1 else "docs"
+        display_name = f"{session_name} ({timestamp}) - {doc_count} {doc_text}"
+        session_options[display_name] = session_id
 
-    selected_option = st.selectbox("Choose a previous document", options=options_list)
+    options_list = ["✨ Start New Session"] + list(session_options.keys())
+
+    selected_option = st.selectbox("Choose a previous session", options=options_list)
+
     if selected_option != "✨ Start New Session":
         if st.button("Load Selected Session", width="stretch"):
-            doc_id_to_load = doc_options[selected_option]
-            load_session(doc_id_to_load)
+            session_id_to_load = session_options[selected_option]
+            load_session(session_id_to_load)
     else:
         if st.button("Start New Session", width="stretch"):
             # Reset all relevant session state variables
             st.session_state.processing_complete = False
-            st.session_state.rag_pipeline = None
-            st.session_state.active_document_id = None
+            st.session_state.rag_pipelines = []
+            st.session_state.active_document_ids = []
+            st.session_state.active_session_id = None
             st.session_state.chat_history = []
             st.rerun()
+
+
+def load_session(session_id: int):
+    """Handles the logic of loading a past session from the database."""
+    with st.spinner(f"Loading session {session_id}..."):
+        try:
+            # Get all documents in this session
+            documents = st.session_state.db_manager.get_session_documents(session_id)
+            if not documents:
+                st.error("Could not find session data.")
+                return
+
+            # Load all RAG pipelines for the documents in this session
+            rag_pipelines = []
+            doc_ids = []
+
+            for doc_data in documents:
+                # Re-initialize the RAG pipeline with the saved vision model
+                rag_pipeline = SmartRAG(
+                    output_dir=doc_data["chart_dir"],
+                    vision_model_name=doc_data["vision_model_used"],
+                    load_vision=False,
+                )
+
+                # Load the saved state (FAISS index and chunks)
+                rag_pipeline.load_state(
+                    doc_data["faiss_index_path"], doc_data["chunks_path"]
+                )
+                rag_pipeline.chart_descriptions = doc_data["chart_descriptions"]
+
+                rag_pipelines.append(rag_pipeline)
+                doc_ids.append(doc_data["id"])
+
+            # Restore state with all documents
+            st.session_state.rag_pipelines = rag_pipelines
+            st.session_state.processing_complete = True
+            st.session_state.active_document_ids = doc_ids
+            st.session_state.active_session_id = session_id
+            st.session_state.selected_vision_model = documents[0]["vision_model_used"]
+
+            # Load chat history for this session
+            st.session_state.chat_history = (
+                st.session_state.db_manager.get_queries_for_session(session_id)
+            )
+
+            doc_names = [doc["original_filename"] for doc in documents]
+            if len(doc_names) == 1:
+                st.success(f"Successfully loaded session with '{doc_names[0]}'.")
+            else:
+                st.success(
+                    f"Successfully loaded session with {len(doc_names)} documents."
+                )
+
+            time.sleep(1)
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Failed to load session: {e}")
+            traceback.print_exc()
 
 
 def load_session(doc_id: int):
@@ -89,16 +153,13 @@ def load_session(doc_id: int):
             rag_pipeline.load_state(
                 doc_data["faiss_index_path"], doc_data["chunks_path"]
             )
+            rag_pipeline.chart_descriptions = doc_data["chart_descriptions"]
 
-            # Restore state
-            st.session_state.rag_pipeline = rag_pipeline
+            # Restore state with lists
+            st.session_state.rag_pipelines = [rag_pipeline]
             st.session_state.processing_complete = True
-            st.session_state.active_document_id = doc_id
-            st.session_state.chart_dir = Path(doc_data["chart_dir"])
+            st.session_state.active_document_ids = [doc_id]
             st.session_state.selected_vision_model = doc_data["vision_model_used"]
-            st.session_state.rag_pipeline.chart_descriptions = doc_data[
-                "chart_descriptions"
-            ]
 
             st.success(
                 f"Successfully loaded session for '{doc_data['original_filename']}'."
@@ -138,9 +199,7 @@ def display_vision_model_selection():
         if st.session_state.processing_complete:
             st.warning("⚠️ Vision model changed. Please re-process your document.")
             st.session_state.processing_complete = False
-            st.session_state.rag_pipeline = None
-
-    # st.markdown(f"**Selected:** `{selected_model}`")
+            st.session_state.rag_pipelines = []
 
     with st.expander("ℹ️ Model Information"):
         if selected_model == "Moondream2":
@@ -188,123 +247,170 @@ def display_document_uploader(groq_api_key: str):
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 📄 Upload Document")
 
-    uploaded_file = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "Choose a PDF, DOCX, or PPTX file",
         type=["pdf", "docx", "pptx"],
         label_visibility="collapsed",
+        accept_multiple_files=True,
     )
 
-    if uploaded_file and groq_api_key:
-        if st.button("🚀 Process Document", width="stretch"):
-            process_document(uploaded_file)
+    if uploaded_files and groq_api_key:
+        button_text = "🚀 Process Document"
+        if len(uploaded_files) > 1:
+            button_text += "s"
+        if st.button(button_text, width="stretch"):
+            process_document(uploaded_files)
 
 
-def process_document(uploaded_file):
+def process_document(uploaded_files):
     """
-    Handles the core logic of processing the uploaded document.
+    Handles the core logic of processing multiple uploaded documents.
     """
     progress_bar = st.progress(0, text="Initializing...")
     status_text = st.empty()
 
+    # Store document IDs and pipelines for all processed files
+    processed_doc_ids = []
+    processed_pipelines = []
+
     try:
-        # Create a unique directory for chart outputs for this run
-        chart_dir = get_chart_output_dir(uploaded_file.name)
-        chart_dir.mkdir(parents=True, exist_ok=True)
-        st.session_state.chart_dir = chart_dir.resolve()
+        # Create a new session for these documents
+        filenames = [f.name for f in uploaded_files]
+        session_id = st.session_state.db_manager.create_session(filenames)
+        st.session_state.active_session_id = session_id  # Set immediately
 
-        # Save uploaded file to a temporary path
-        file_ext = os.path.splitext(uploaded_file.name)[1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            st.session_state.temp_file_path = tmp_file.name
+        total_files = len(uploaded_files)
 
-        status_text.markdown("✅ **Temporary file created**")
-        progress_bar.progress(5, text="File saved. Initializing models.")
+        for file_index, uploaded_file in enumerate(uploaded_files):
+            # Update overall progress
+            file_progress_start = int((file_index / total_files) * 100)
+            file_progress_range = int(100 / total_files)
 
-        # Initialize RAG pipeline with the selected vision model
-        status_text.markdown(
-            f"🧠 **Initializing SmartRAG with `{st.session_state.selected_vision_model}`...**"
-        )
-        st.session_state.rag_pipeline = SmartRAG(
-            output_dir=str(st.session_state.chart_dir),
-            vision_model_name=st.session_state.selected_vision_model,
-        )
-
-        progress_bar.progress(
-            20, text="Models initialized. Starting document analysis."
-        )
-        status_text.markdown("📊 **Parsing document and detecting charts...**")
-
-        # Define a callback function to update the progress bar from the pipeline
-        def update_progress(current, total):
-            progress_percent = 20 + int((current / total) * 70)
-            progress_bar.progress(
-                progress_percent, text=f"Processing page {current}/{total}..."
+            status_text.markdown(
+                f"📄 **Processing file {file_index + 1}/{total_files}: {uploaded_file.name}**"
             )
 
-        # Run the main indexing process
-        st.session_state.rag_pipeline.index_document(
-            st.session_state.temp_file_path,
-            chunk_size=500,
-            overlap=100,
-            progress_callback=update_progress,
+            # Create a unique directory for chart outputs for this file
+            chart_dir = get_chart_output_dir(uploaded_file.name)
+            chart_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save uploaded file to a temporary path
+            file_ext = os.path.splitext(uploaded_file.name)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                temp_file_path = tmp_file.name
+
+            status_text.markdown(
+                f"✅ **Temporary file created for {uploaded_file.name}**"
+            )
+            progress_bar.progress(
+                file_progress_start + int(file_progress_range * 0.05),
+                text=f"File {file_index + 1}/{total_files} saved. Initializing models.",
+            )
+
+            # Initialize RAG pipeline with the selected vision model
+            status_text.markdown(
+                f"🧠 **Initializing SmartRAG for {uploaded_file.name} with `{st.session_state.selected_vision_model}`...**"
+            )
+            rag_pipeline = SmartRAG(
+                output_dir=str(chart_dir),
+                vision_model_name=st.session_state.selected_vision_model,
+            )
+
+            progress_bar.progress(
+                file_progress_start + int(file_progress_range * 0.20),
+                text=f"Models initialized for file {file_index + 1}/{total_files}. Starting document analysis.",
+            )
+            status_text.markdown(
+                f"📊 **Parsing {uploaded_file.name} and detecting charts...**"
+            )
+
+            # Define a callback function to update the progress bar from the pipeline
+            def update_progress(current, total):
+                progress_percent = (
+                    file_progress_start
+                    + int(file_progress_range * 0.20)
+                    + int((current / total) * file_progress_range * 0.70)
+                )
+                progress_bar.progress(
+                    progress_percent,
+                    text=f"Processing file {file_index + 1}/{total_files} - page {current}/{total}...",
+                )
+
+            # Run the main indexing process
+            rag_pipeline.index_document(
+                temp_file_path,
+                chunk_size=500,
+                overlap=100,
+                progress_callback=update_progress,
+            )
+
+            progress_bar.progress(
+                file_progress_start + int(file_progress_range * 0.95),
+                text=f"Saving processed state for file {file_index + 1}/{total_files}...",
+            )
+
+            # Create the DB record for this document, linked to the session
+            doc_id = st.session_state.db_manager.add_document_record(
+                filename=uploaded_file.name,
+                vision_model=st.session_state.selected_vision_model,
+                chart_dir=str(chart_dir),
+                faiss_path="",  # Placeholder
+                chunks_path="",  # Placeholder
+                chart_descriptions=rag_pipeline.chart_descriptions,
+                session_id=session_id,  # Link to session
+            )
+            processed_doc_ids.append(doc_id)
+            processed_pipelines.append(rag_pipeline)
+
+            # Save the FAISS index and chunks using the new doc_id
+            faiss_path, chunks_path = rag_pipeline.save_state(doc_id)
+
+            # Update the record with the correct paths
+            st.session_state.db_manager.conn.execute(
+                "UPDATE documents SET faiss_index_path = ?, chunks_path = ? WHERE id = ?",
+                (faiss_path, chunks_path, doc_id),
+            )
+            st.session_state.db_manager.conn.commit()
+
+            # Clean up the temporary file for this document
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+            # Report charts found for this file
+            actual_charts = get_all_chart_images(chart_dir)
+            if actual_charts:
+                status_text.markdown(
+                    f"✅ **{uploaded_file.name}**: Found and analyzed {len(actual_charts)} charts."
+                )
+            else:
+                status_text.markdown(f"⚠️ **{uploaded_file.name}**: No charts detected.")
+
+        # All files processed
+        progress_bar.progress(100, text="All documents processed!")
+        status_text.markdown(
+            f"✅ **Successfully processed {total_files} document(s)!**"
         )
 
-        progress_bar.progress(95, text="Saving processed state...")
-
-        # A new document was processed, so get a new ID from the DB
-        # Note: We need to create the DB record *before* saving state to get the ID
-        doc_id = st.session_state.db_manager.add_document_record(
-            filename=uploaded_file.name,
-            vision_model=st.session_state.selected_vision_model,
-            chart_dir=str(st.session_state.chart_dir),
-            faiss_path="",  # Placeholder
-            chunks_path="",  # Placeholder
-            chart_descriptions=st.session_state.rag_pipeline.chart_descriptions,
-        )
-        st.session_state.active_document_id = doc_id
-
-        # Save the FAISS index and chunks using the new doc_id
-        faiss_path, chunks_path = st.session_state.rag_pipeline.save_state(doc_id)
-
-        # Now update the record with the correct paths
-        st.session_state.db_manager.conn.execute(
-            "UPDATE documents SET faiss_index_path = ?, chunks_path = ? WHERE id = ?",
-            (faiss_path, chunks_path, doc_id),
-        )
-        st.session_state.db_manager.conn.commit()
-
-        progress_bar.progress(100, text="Processing Complete!")
-
-        progress_bar.progress(100, text="Processing Complete!")
-        status_text.markdown("✅ **Document processing complete!**")
+        # Set all processed documents as active
+        st.session_state.active_document_ids = processed_doc_ids
+        st.session_state.rag_pipelines = processed_pipelines
+        st.session_state.chat_history = []  # Initialize empty chat history
         st.session_state.processing_complete = True
-        time.sleep(1)
-
-        # Final status update
-        actual_charts = get_all_chart_images(st.session_state.chart_dir)
-        if actual_charts:
-            status_text.success(f"📊 Found and analyzed {len(actual_charts)} charts.")
-        else:
-            status_text.info("⚠️ No charts were detected in the document.")
 
         time.sleep(2)
         progress_bar.empty()
         status_text.empty()
-        st.success(f"Document processed with {st.session_state.selected_vision_model}!")
+
+        st.success(
+            f"✅ Processed {total_files} document(s) with {st.session_state.selected_vision_model}!"
+        )
 
     except Exception as e:
         progress_bar.empty()
         status_text.empty()
         st.error(f"❌ An error occurred during processing: {str(e)}")
         traceback.print_exc()  # Log the full error to the console for debugging
-    finally:
-        # Clean up the temporary file
-        if st.session_state.temp_file_path and os.path.exists(
-            st.session_state.temp_file_path
-        ):
-            os.remove(st.session_state.temp_file_path)
-            st.session_state.temp_file_path = None
 
 
 def display_technology_explanations():

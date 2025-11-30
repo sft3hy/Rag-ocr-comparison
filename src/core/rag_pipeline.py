@@ -214,6 +214,7 @@ class SmartRAG:
                 self._save_step_example(
                     "step2_chart_descriptions", self.chart_descriptions, "json"
                 )
+        self.vision_model.offload_model()
 
         # STEP 3: Chunk the document
         print("\n[STEP 3] CHUNKING DOCUMENT")
@@ -570,4 +571,133 @@ class SmartRAG:
             error_result = {"error": str(e)}
             if self.verbose:
                 self._save_step_example("query_error", error_result, "json")
+            return error_result
+
+    def query_multiple(
+        self, question: str, pipelines: List["SmartRAG"], top_k: int = 5
+    ) -> Dict:
+        """
+        Performs a RAG query across multiple document pipelines.
+
+        Args:
+            question (str): The user's question.
+            pipelines (List[SmartRAG]): List of SmartRAG pipelines to query.
+            top_k (int): The number of chunks to retrieve from each document.
+
+        Returns:
+            A dictionary containing the response and source documents.
+        """
+        print("\n" + "=" * 80)
+        print("MULTI-DOCUMENT RAG QUERY PIPELINE")
+        print("=" * 80)
+        print(f"Question: '{question}'")
+        print(f"Querying {len(pipelines)} document(s)")
+        print("=" * 80 + "\n")
+
+        all_results = []
+
+        # Search across all pipelines
+        for idx, pipeline in enumerate(pipelines, 1):
+            print(f"\n[SEARCHING DOCUMENT {idx}/{len(pipelines)}]")
+            results = pipeline.search(question, top_k)
+            all_results.extend(results)
+
+        # Sort by relevance score and take top results
+        all_results.sort(key=lambda x: x[1])  # Sort by distance (lower is better)
+        top_results = all_results[: top_k * 2]  # Get more results from combined set
+
+        print(f"\n✓ Combined results from all documents: {len(top_results)} chunks")
+
+        # Build context
+        print("\n[BUILDING CONTEXT]")
+        context = "\n\n---\n\n".join(
+            [
+                f"[Source: {chunk.source}, Page: {chunk.page}]\n{chunk.text}"
+                for chunk, score in top_results
+            ]
+        )
+        print(
+            f"✓ Context built from {len(top_results)} chunks ({len(context):,} chars)"
+        )
+
+        # Create prompt
+        prompt = f"""Based on the following context from multiple documents, answer the question accurately and concisely.
+        Context:
+        {context}
+
+        Question: {question}
+        
+        Instructions:
+        - Answer directly based ONLY on the context provided.
+        - If information comes from different documents, mention which sources support which parts of your answer.
+        - If chart data is mentioned, cite specific values and trends.
+        - If page numbers are available in the source metadata, mention them.
+        - If the answer isn't in the context, state that clearly.
+        - Keep your answer focused and under 250 words.
+        
+        Answer:"""
+
+        if self.verbose:
+            context_info = {
+                "question": question,
+                "documents_queried": len(pipelines),
+                "chunks_used": len(top_results),
+                "context_length": len(context),
+                "sources": [
+                    {"source": chunk.source, "page": chunk.page, "score": float(score)}
+                    for chunk, score in top_results
+                ],
+            }
+            self._save_step_example("multi_query_context", context_info, "json")
+
+        try:
+            print("\n[GENERATING RESPONSE]")
+            print("Calling Groq API with Llama model...")
+            response = self.groq_client.create_chat_completion(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a precise AI assistant. You answer questions based on provided context from multiple documents. Cite sources and page numbers when available. If information comes from different documents, clarify which sources support which parts of your answer.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+
+            answer = response.choices[0].message.content
+            print(f"✓ Response generated ({len(answer)} chars)")
+
+            result = {
+                "question": question,
+                "context": context,
+                "results": [
+                    {
+                        "text": chunk.text,
+                        "source": chunk.source,
+                        "page": chunk.page,
+                        "score": score,
+                    }
+                    for chunk, score in top_results
+                ],
+                "response": answer,
+                "documents_queried": len(pipelines),
+            }
+
+            if self.verbose:
+                self._save_step_example("multi_query_final_response", result, "json")
+                print("\n" + "=" * 80)
+                print("MULTI-DOCUMENT QUERY COMPLETE")
+                print("=" * 80)
+                print(f"Answer: {answer[:300]}...")
+                print("=" * 80 + "\n")
+
+            return result
+
+        except Exception as e:
+            print(f"✗ Error during Groq API call: {e}")
+            error_result = {"error": str(e)}
+            if self.verbose:
+                self._save_step_example("multi_query_error", error_result, "json")
             return error_result

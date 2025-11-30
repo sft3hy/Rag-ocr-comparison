@@ -14,7 +14,7 @@ def main():
     """
     # Page configuration
     st.set_page_config(
-        page_title="Smart RAG Document Analyzer",
+        # page_title="Smart RAG Document Analyzer",
         page_icon="🧠",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -23,15 +23,22 @@ def main():
     # Apply custom CSS
     st.markdown(custom_css, unsafe_allow_html=True)
 
-    # Initialize session state
-    if "rag_pipeline" not in st.session_state:
-        st.session_state.rag_pipeline = None
+    # Initialize session state variables
+    if "active_session_id" not in st.session_state:
+        st.session_state.active_session_id = None
+
+    if "active_document_ids" not in st.session_state:
+        st.session_state.active_document_ids = []
+
+    if "rag_pipelines" not in st.session_state:
+        st.session_state.rag_pipelines = []
+
     if "processing_complete" not in st.session_state:
         st.session_state.processing_complete = False
-    if "temp_file_path" not in st.session_state:
-        st.session_state.temp_file_path = None
-    if "chart_dir" not in st.session_state:
-        st.session_state.chart_dir = None
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
     if "selected_vision_model" not in st.session_state:
         st.session_state.selected_vision_model = "Moondream2"
 

@@ -6,7 +6,7 @@ Provides a unified interface for multiple vision models:
 - Qwen3-VL
 - InternVL3.5
 
-With automatic memory management to ensure only one model is loaded at a time.
+Now with model offloading support to free up GPU/memory resources.
 """
 
 import torch
@@ -28,6 +28,7 @@ class VisionModel(ABC):
         self.model = None
         self.tokenizer = None
         self.processor = None
+        self._is_loaded = False
 
     def _get_device(self) -> str:
         """Determine the best available device"""
@@ -53,11 +54,15 @@ class VisionModel(ABC):
         """Return the display name of the model"""
         pass
 
-    def unload_model(self):
-        """Unload the model and free memory"""
-        print(f"Unloading {self.get_model_name()}...")
+    def offload_model(self):
+        """Offload the model from GPU/memory to free up resources"""
+        if not self._is_loaded:
+            print(f"{self.get_model_name()} is not loaded, nothing to offload.")
+            return
 
-        # Delete model components
+        print(f"Offloading {self.get_model_name()}...")
+
+        # Delete model, tokenizer, and processor
         if self.model is not None:
             del self.model
             self.model = None
@@ -73,16 +78,21 @@ class VisionModel(ABC):
         # Force garbage collection
         gc.collect()
 
-        # Clear CUDA cache if available
-        if torch.cuda.is_available():
+        # Clear CUDA cache if using CUDA
+        if self.device == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-        # Clear MPS cache if available
-        if torch.backends.mps.is_available():
+        # Clear MPS cache if using MPS
+        if self.device == "mps" and torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
-        print(f"✓ {self.get_model_name()} unloaded from memory")
+        self._is_loaded = False
+        print(f"✓ {self.get_model_name()} offloaded successfully")
+
+    def is_loaded(self) -> bool:
+        """Check if the model is currently loaded"""
+        return self._is_loaded
 
 
 class Moondream2Model(VisionModel):
@@ -109,19 +119,24 @@ class Moondream2Model(VisionModel):
                 use_fast=True,
             )
 
+            self._is_loaded = True
             print(f"✓ Moondream2 loaded successfully on {self.device}")
             return True
 
         except Exception as e:
             print(f"✗ Failed to load Moondream2: {e}")
+            self._is_loaded = False
             return False
 
     def describe_image(self, image: Image.Image, prompt: str) -> str:
         """Generate description using Moondream2"""
+        if not self._is_loaded:
+            return "[Error: Model not loaded. Please load the model first.]"
+
         try:
             start_time = time.time()
             enc_image = self.model.encode_image(image)
-            description = self.model.caption(enc_image, length="normal")["caption"]
+            description = self.model.answer_question(enc_image, prompt, self.tokenizer)
             end_time = time.time()
             print(
                 f"Moondream image description took: {round(end_time - start_time, 2)} seconds."
@@ -141,6 +156,7 @@ class Qwen3VLModel(VisionModel):
         """Load Qwen3-VL model"""
         try:
             from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+            from qwen_vl_utils import process_vision_info
 
             print(f"Loading Qwen3-VL on {self.device}...")
             model_id = "Qwen/Qwen3-VL-2B-Instruct"
@@ -149,50 +165,32 @@ class Qwen3VLModel(VisionModel):
                 model_id, trust_remote_code=True, use_fast=True
             )
 
-            # Use bfloat16 instead of float16 for better numerical stability
-            dtype = torch.bfloat16 if self.device != "mps" else torch.float32
-
             self.model = Qwen3VLForConditionalGeneration.from_pretrained(
                 model_id,
-                dtype=dtype,
+                dtype=torch.float16,
                 device_map=self.device,
                 trust_remote_code=True,
             )
 
             self.model.eval()
 
-            print(f"✓ Qwen3-VL loaded successfully on {self.device} with dtype={dtype}")
+            self._is_loaded = True
+            print(f"✓ Qwen3-VL loaded successfully on {self.device}")
             return True
 
         except Exception as e:
             print(f"✗ Failed to load Qwen3-VL: {e}")
+            self._is_loaded = False
             return False
 
     def describe_image(self, image: Image.Image, prompt: str) -> str:
         """Generate description using Qwen3-VL"""
+        if not self._is_loaded:
+            return "[Error: Model not loaded. Please load the model first.]"
+
         try:
             start_time = time.time()
             from qwen_vl_utils import process_vision_info
-
-            # Ensure image is RGB
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-
-            # Resize large images to prevent memory explosion
-            max_dimension = 1024
-            width, height = image.size
-            if width > max_dimension or height > max_dimension:
-                if width > height:
-                    new_width = max_dimension
-                    new_height = int(height * (max_dimension / width))
-                else:
-                    new_height = max_dimension
-                    new_width = int(width * (max_dimension / height))
-
-                print(
-                    f"    Resizing image from {width}x{height} to {new_width}x{new_height}"
-                )
-                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
             # Prepare messages
             messages = [
@@ -219,16 +217,11 @@ class Qwen3VLModel(VisionModel):
             )
             inputs = inputs.to(self.device)
 
-            # Generate response with proper parameters
+            # Generate response
             with torch.inference_mode():
                 generated_ids = self.model.generate(
                     **inputs,
                     max_new_tokens=2048,
-                    do_sample=False,
-                    temperature=None,
-                    top_p=None,
-                    pad_token_id=self.processor.tokenizer.pad_token_id,
-                    eos_token_id=self.processor.tokenizer.eos_token_id,
                 )
                 generated_ids_trimmed = [
                     out_ids[len(in_ids) :]
@@ -239,7 +232,6 @@ class Qwen3VLModel(VisionModel):
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=False,
                 )[0]
-
             end_time = time.time()
             print(
                 f"Qwen3 image description took: {round(end_time - start_time, 2)} seconds."
@@ -248,9 +240,6 @@ class Qwen3VLModel(VisionModel):
             return response
 
         except Exception as e:
-            import traceback
-
-            traceback.print_exc()
             return f"[Qwen3-VL analysis failed: {str(e)}]"
 
     def get_model_name(self) -> str:
@@ -284,15 +273,20 @@ class InternVL3Model(VisionModel):
                 use_fast=True,
             )
 
+            self._is_loaded = True
             print(f"✓ InternVL3.5 loaded successfully on {self.device}")
             return True
 
         except Exception as e:
             print(f"✗ Failed to load InternVL3.5: {e}")
+            self._is_loaded = False
             return False
 
     def describe_image(self, image: Image.Image, prompt: str) -> str:
         """Generate description using InternVL3.5"""
+        if not self._is_loaded:
+            return "[Error: Model not loaded. Please load the model first.]"
+
         start_time = time.time()
         try:
             from torchvision import transforms as T
@@ -351,7 +345,7 @@ class InternVL3Model(VisionModel):
 
 
 class VisionModelFactory:
-    """Factory class to create vision model instances with memory management"""
+    """Factory class to create vision model instances"""
 
     MODELS = {
         "Moondream2": Moondream2Model,
@@ -359,14 +353,10 @@ class VisionModelFactory:
         "InternVL3.5-1B": InternVL3Model,
     }
 
-    _current_model: Optional[VisionModel] = None
-    _current_model_name: Optional[str] = None
-
     @classmethod
     def create_model(cls, model_name: str) -> Optional[VisionModel]:
         """
-        Create and load a vision model by name.
-        Automatically unloads any previously loaded model.
+        Create and load a vision model by name
 
         Args:
             model_name: Name of the model to load
@@ -379,42 +369,35 @@ class VisionModelFactory:
             print(f"Available models: {list(cls.MODELS.keys())}")
             return None
 
-        # Unload current model if it exists and is different
-        if cls._current_model is not None and cls._current_model_name != model_name:
-            cls._current_model.unload_model()
-            cls._current_model = None
-            cls._current_model_name = None
-
-        # Return existing model if already loaded
-        if cls._current_model_name == model_name:
-            print(f"✓ {model_name} already loaded, reusing instance")
-            return cls._current_model
-
-        # Load new model
         model_class = cls.MODELS[model_name]
         model_instance = model_class()
 
         if model_instance.load_model():
-            cls._current_model = model_instance
-            cls._current_model_name = model_name
             return model_instance
         else:
             return None
 
     @classmethod
-    def unload_current_model(cls):
-        """Explicitly unload the currently loaded model"""
-        if cls._current_model is not None:
-            cls._current_model.unload_model()
-            cls._current_model = None
-            cls._current_model_name = None
-
-    @classmethod
-    def get_current_model_name(cls) -> Optional[str]:
-        """Get the name of the currently loaded model"""
-        return cls._current_model_name
-
-    @classmethod
     def get_available_models(cls) -> list:
         """Get list of available model names"""
         return list(cls.MODELS.keys())
+
+
+# Example usage demonstrating offloading
+if __name__ == "__main__":
+    # Load a model
+    model = VisionModelFactory.create_model("Moondream2")
+
+    if model:
+        # Use the model
+        from PIL import Image
+
+        img = Image.open("example.jpg")
+        result = model.describe_image(img, "What is in this image?")
+        print(result)
+
+        # Offload when done
+        model.offload_model()
+
+        # Check if loaded
+        print(f"Model loaded: {model.is_loaded()}")
