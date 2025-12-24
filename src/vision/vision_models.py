@@ -2,9 +2,10 @@
 Vision Model Factory and Implementations
 
 Provides a unified interface for multiple vision models:
-- Moondream2
-- Qwen3-VL
-- InternVL3.5
+- Moondream2 (Native)
+- Qwen3-VL (Native)
+- InternVL3.5 (Native)
+- Ollama (Generic support for Gemma 3, Llama 3.2 Vision, Moondream)
 
 Now with model offloading support to free up GPU/memory resources.
 """
@@ -16,6 +17,7 @@ from typing import Optional
 import warnings
 import time
 import gc
+import io
 
 warnings.filterwarnings("ignore")
 
@@ -32,10 +34,10 @@ class VisionModel(ABC):
 
     def _get_device(self) -> str:
         """Determine the best available device"""
-        if torch.backends.mps.is_available():
-            return "mps"
-        elif torch.cuda.is_available():
+        if torch.cuda.is_available():
             return "cuda"
+        elif torch.backends.mps.is_available():
+            return "mps"
         else:
             return "cpu"
 
@@ -96,7 +98,7 @@ class VisionModel(ABC):
 
 
 class Moondream2Model(VisionModel):
-    """Moondream2 vision model implementation"""
+    """Moondream2 vision model implementation (Native Python)"""
 
     def load_model(self):
         """Load Moondream2 model"""
@@ -156,7 +158,6 @@ class Qwen3VLModel(VisionModel):
         """Load Qwen3-VL model"""
         try:
             from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
-            from qwen_vl_utils import process_vision_info
 
             print(f"Loading Qwen3-VL on {self.device}...")
             model_id = "Qwen/Qwen3-VL-2B-Instruct"
@@ -344,6 +345,117 @@ class InternVL3Model(VisionModel):
         return "InternVL3.5-1B"
 
 
+class OllamaVisionModel(VisionModel):
+    """
+    Generic Ollama Vision Model Wrapper.
+    Supports models like 'gemma3', 'llama3.2-vision', 'moondream'.
+    """
+
+    def __init__(self, model_name="gemma3"):
+        super().__init__()
+        # Use simple model name logic:
+        # If user asks for Gemma 3, we default to 'gemma3' (4B) as 1B is text-only.
+        self.ollama_model_name = model_name
+
+    def load_model(self):
+        """Check availability of Ollama and the requested model"""
+        try:
+            import ollama
+
+            print(f"Connecting to Ollama (Target: {self.ollama_model_name})...")
+
+            # Check if ollama service is reachable
+            # Handle object-based return (newer libs) vs dict-based (older libs)
+            try:
+                list_response = ollama.list()
+                if hasattr(list_response, "models"):
+                    models = [m.model for m in list_response.models]
+                else:
+                    models = [m.get("name") for m in list_response.get("models", [])]
+            except Exception:
+                models = []
+
+            # Fuzzy check if model is pulled
+            is_present = any(self.ollama_model_name in m for m in models)
+
+            if not is_present:
+                print(f"Model '{self.ollama_model_name}' not found. Pulling...")
+                ollama.pull(self.ollama_model_name)
+                print(f"✓ Pulled {self.ollama_model_name}")
+
+            self._is_loaded = True
+            print(f"✓ Ollama ({self.ollama_model_name}) is ready.")
+            return True
+
+        except ImportError:
+            print("✗ 'ollama' python package not installed.")
+            self._is_loaded = False
+            return False
+        except Exception as e:
+            print(f"✗ Ollama connection failed: {e}")
+            self._is_loaded = False
+            return False
+
+    def describe_image(self, image: Image.Image, prompt: str) -> str:
+        """Generate description using Ollama chat interface"""
+        if not self._is_loaded:
+            return "[Error: Ollama not ready.]"
+
+        try:
+            import ollama
+
+            start_time = time.time()
+
+            # Convert PIL image to bytes (equivalent to reading path bytes)
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format="PNG")
+            img_bytes = img_byte_arr.getvalue()
+
+            # Use the chat endpoint as requested
+            response = ollama.chat(
+                model=self.ollama_model_name,
+                messages=[{"role": "user", "content": prompt, "images": [img_bytes]}],
+            )
+
+            # Handle object response (new lib) vs dict response (old lib)
+            if hasattr(response, "message"):
+                content = response.message.content
+            else:
+                content = response["message"]["content"]
+
+            end_time = time.time()
+            print(
+                f"Ollama ({self.ollama_model_name}) took: {round(end_time - start_time, 2)}s"
+            )
+
+            return content
+
+        except Exception as e:
+            err = str(e)
+            if "missing data required for image input" in err:
+                return (
+                    f"[ERROR: Model '{self.ollama_model_name}' appears to be text-only. "
+                    f"Please try 'gemma3' (4B) or 'llama3.2-vision'.]"
+                )
+            return f"[Ollama analysis failed: {err}]"
+
+    def offload_model(self):
+        """Force unload via API"""
+        if not self._is_loaded:
+            return
+        try:
+            import ollama
+
+            ollama.generate(model=self.ollama_model_name, prompt="", keep_alive=0)
+            self._is_loaded = False
+            print(f"✓ {self.ollama_model_name} offloaded.")
+        except:
+            pass
+
+    def get_model_name(self) -> str:
+        return f"Ollama-{self.ollama_model_name}"
+
+
 class VisionModelFactory:
     """Factory class to create vision model instances"""
 
@@ -351,53 +463,39 @@ class VisionModelFactory:
         "Moondream2": Moondream2Model,
         "Qwen3-VL-2B": Qwen3VLModel,
         "InternVL3.5-1B": InternVL3Model,
+        # Factory lambdas for Ollama models
+        "Ollama-Gemma3": lambda: OllamaVisionModel(
+            "gemma3"
+        ),  # Defaults to 4B multimodal
+        "Ollama-Granite3.2-Vision": lambda: OllamaVisionModel("granite3.2-vision"),
     }
 
     @classmethod
     def create_model(cls, model_name: str) -> Optional[VisionModel]:
-        """
-        Create and load a vision model by name
-
-        Args:
-            model_name: Name of the model to load
-
-        Returns:
-            Loaded VisionModel instance or None if failed
-        """
         if model_name not in cls.MODELS:
             print(f"Unknown model: {model_name}")
-            print(f"Available models: {list(cls.MODELS.keys())}")
             return None
 
-        model_class = cls.MODELS[model_name]
-        model_instance = model_class()
+        factory = cls.MODELS[model_name]
+        # Handle simple class vs lambda factory
+        if isinstance(factory, type):
+            instance = factory()
+        else:
+            instance = factory()
 
-        if model_instance.load_model():
-            return model_instance
+        if instance.load_model():
+            return instance
         else:
             return None
 
     @classmethod
     def get_available_models(cls) -> list:
-        """Get list of available model names"""
         return list(cls.MODELS.keys())
 
 
-# Example usage demonstrating offloading
 if __name__ == "__main__":
-    # Load a model
-    model = VisionModelFactory.create_model("Moondream2")
-
+    # Example usage
+    model = VisionModelFactory.create_model("Ollama-Gemma3")
     if model:
-        # Use the model
-        from PIL import Image
-
-        img = Image.open("example.jpg")
-        result = model.describe_image(img, "What is in this image?")
-        print(result)
-
-        # Offload when done
-        model.offload_model()
-
-        # Check if loaded
         print(f"Model loaded: {model.is_loaded()}")
+        model.offload_model()

@@ -1,149 +1,75 @@
 import re
-from typing import List
+from typing import List, Tuple, Dict
 from src.core.data_models import Chunk
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from uuid import uuid4
 
 
-# This is now a standalone helper function, so 'self' is removed.
-def _get_page_from_context(full_text: str, chart_description: str) -> int:
+class DocumentChunker:
     """
-    Finds the page number for a chart description based on the preceding text.
+    Implements the Parent-Child chunking strategy.
+    Splits document into large parent chunks (for context)
+    and smaller child chunks (for embedding/retrieval).
     """
-    try:
-        preceding_text = full_text.split(chart_description)[0]
-        # Find the *last* page marker before the chart description
-        page_matches = re.findall(r"## (?:Page|Slide) (\d+)", preceding_text)
-        if page_matches:
-            return int(page_matches[-1])
-    except Exception:
-        # If anything goes wrong, default to page 0
-        pass
-    return 0
 
-
-def _chunk_text_by_sentence(
-    text: str,
-    source: str,
-    page_num: int,
-    chunk_size: int,
-    overlap: int,
-    existing_chunks: List[Chunk],
-) -> List[Chunk]:
-    """
-    A helper function to chunk a block of regular text by sentences.
-    """
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    current_chunk_sentences = []
-    current_length = 0
-
-    for sentence in sentences:
-        sentence_len = len(sentence)
-        # If adding the next sentence exceeds the chunk size, finalize the current chunk
-        if current_length + sentence_len > chunk_size and current_chunk_sentences:
-            chunk_text = " ".join(current_chunk_sentences)
-            existing_chunks.append(
-                Chunk(
-                    text=chunk_text,
-                    source=source,
-                    page=page_num,
-                    chunk_id=len(existing_chunks),
-                )
-            )
-
-            # Start a new chunk with overlapping sentences
-            overlap_sentences = []
-            overlap_len = 0
-            for s in reversed(current_chunk_sentences):
-                if overlap_len + len(s) < overlap:
-                    overlap_sentences.insert(0, s)
-                    overlap_len += len(s)
-                else:
-                    break
-            current_chunk_sentences = overlap_sentences
-            current_length = sum(len(s) for s in current_chunk_sentences)
-
-        current_chunk_sentences.append(sentence)
-        current_length += len(sentence) + 1  # +1 for the space
-
-    # Add the last remaining chunk
-    if current_chunk_sentences:
-        chunk_text = " ".join(current_chunk_sentences)
-        existing_chunks.append(
-            Chunk(
-                text=chunk_text,
-                source=source,
-                page=page_num,
-                chunk_id=len(existing_chunks),
-            )
+    def __init__(
+        self,
+        child_chunk_size: int = 400,
+        child_chunk_overlap: int = 50,
+        parent_chunk_size: int = 2000,
+        parent_chunk_overlap: int = 200,
+    ):
+        self.child_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=child_chunk_size,
+            chunk_overlap=child_chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
-    return existing_chunks
+        # using Recursive here as it's generally safer than Markdown only for generic text
+        self.parent_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=parent_chunk_size,
+            chunk_overlap=parent_chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
 
+    def process(self, text: str, source: str) -> Tuple[List[Chunk], Dict[str, Chunk]]:
+        """
+        Returns:
+            - child_chunks: List of Chunk objects (to be embedded)
+            - parent_map: Dict[parent_id, Chunk] (to be retrieved)
+        """
+        parent_docs = self.parent_splitter.create_documents([text])
 
-# This is now a standalone function, so 'self' is removed.
-def smart_chunk(
-    text: str, source: str, chunk_size: int = 500, overlap: int = 100
-) -> List[Chunk]:
-    """
-    Splits text into meaningful chunks, handling special blocks like chart descriptions
-    and processing content page by page.
-    """
-    all_chunks: List[Chunk] = []
+        parent_map = {}
+        child_chunks = []
+        if "/" in source:
+            source = source.split("/")[-1]
 
-    # Isolate special blocks (like chart descriptions) from the main text
-    content_parts = re.split(
-        r"(\[CHART DESCRIPTION:.*?\]|\[SLIDE VISUAL DESCRIPTION:.*?\])",
-        text,
-        flags=re.DOTALL,
-    )
-
-    for part in content_parts:
-        if not part.strip():
-            continue
-
-        # If the part is a special block, treat it as a single, atomic chunk
-        if part.startswith("[CHART DESCRIPTION:") or part.startswith(
-            "[SLIDE VISUAL DESCRIPTION:"
-        ):
-            page_num = _get_page_from_context(
-                text, part
-            )  # Direct function call, no 'self'
-            all_chunks.append(
-                Chunk(text=part, source=source, page=page_num, chunk_id=len(all_chunks))
+        for p_idx, p_doc in enumerate(parent_docs):
+            # Create Parent Chunk
+            parent_id = str(uuid4())
+            parent_chunk = Chunk(
+                text=p_doc.page_content,
+                source=source,
+                page=0,  # Page handling would require more complex parsing logic
+                chunk_id=parent_id,
+                is_parent=True,
+                metadata={"index": p_idx},
             )
-        else:
-            # This is regular text, so we process it page by page.
-            # Split the text part by our page/slide markers
-            pages = re.split(r"(## (?:Page|Slide) \d+)", part)
+            parent_map[parent_id] = parent_chunk
 
-            # **ROBUSTNESS FIX**: If there are no page markers, treat the whole part as a single page.
-            if len(pages) == 1:
-                _chunk_text_by_sentence(
-                    pages[0], source, 1, chunk_size, overlap, all_chunks
+            # Create Child Chunks from this Parent
+            child_docs = self.child_splitter.create_documents([p_doc.page_content])
+
+            for c_doc in child_docs:
+                child_id = str(uuid4())
+                child_chunk = Chunk(
+                    text=c_doc.page_content,
+                    source=source,
+                    page=0,
+                    chunk_id=child_id,
+                    parent_id=parent_id,
+                    is_parent=False,
                 )
-            else:
-                current_page = 1
-                # Process the text before the first page marker
-                if pages[0].strip():
-                    _chunk_text_by_sentence(
-                        pages[0], source, current_page, chunk_size, overlap, all_chunks
-                    )
+                child_chunks.append(child_chunk)
 
-                # Iterate through the pages and their content
-                for i in range(1, len(pages), 2):
-                    header = pages[i]
-                    page_content = pages[i + 1]
-
-                    page_match = re.search(r"## (?:Page|Slide) (\d+)", header)
-                    if page_match:
-                        current_page = int(page_match.group(1))
-
-                    if page_content.strip():
-                        _chunk_text_by_sentence(
-                            page_content,
-                            source,
-                            current_page,
-                            chunk_size,
-                            overlap,
-                            all_chunks,
-                        )
-
-    return all_chunks
+        return child_chunks, parent_map

@@ -1,5 +1,3 @@
-# src/utils/db_utils.py
-
 import sqlite3
 import json
 import os
@@ -22,6 +20,7 @@ class DatabaseManager:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = self._create_connection()
         self._initialize_database()
+        self._migrate_database()  # Check and apply migrations
 
     def _create_connection(self):
         """Creates and returns a database connection."""
@@ -36,7 +35,7 @@ class DatabaseManager:
         if not self.conn:
             return
 
-        # Sessions table - groups multiple documents together
+        # Sessions table
         create_sessions_table_sql = """
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +44,7 @@ class DatabaseManager:
         );
         """
 
-        # Documents table - now linked to sessions
+        # Documents table
         create_docs_table_sql = """
         CREATE TABLE IF NOT EXISTS documents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +60,7 @@ class DatabaseManager:
         );
         """
 
-        # Queries table - now linked to sessions instead of individual documents
+        # Queries table (New Schema)
         create_queries_table_sql = """
         CREATE TABLE IF NOT EXISTS queries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,21 +79,69 @@ class DatabaseManager:
             cursor.execute(create_docs_table_sql)
             cursor.execute(create_queries_table_sql)
             self.conn.commit()
-            print("✓ Database initialized successfully.")
         except sqlite3.Error as e:
             print(f"✗ Error initializing database tables: {e}")
 
+    def _migrate_database(self):
+        """
+        Checks for legacy schemas (old columns/constraints) and migrates them.
+        Specifically fixes 'queries.document_id' NOT NULL constraint by recreating the table.
+        """
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            # 1. Check 'queries' table for legacy 'document_id' column
+            cursor.execute("PRAGMA table_info(queries)")
+            columns = [info[1] for info in cursor.fetchall()]
+
+            # If we find 'document_id', it is the old schema.
+            # We must recreate the table to remove the NOT NULL constraint.
+            if "document_id" in columns:
+                print(
+                    "⚡ Migrating DB: Detected legacy 'queries' table. Archiving and recreating..."
+                )
+
+                # Rename old table to backup
+                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                rename_sql = f"ALTER TABLE queries RENAME TO queries_legacy_{timestamp}"
+                cursor.execute(rename_sql)
+
+                # Create the new table immediately
+                create_queries_table_sql = """
+                CREATE TABLE IF NOT EXISTS queries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    question TEXT NOT NULL,
+                    response TEXT NOT NULL,
+                    sources_json TEXT,
+                    timestamp DATETIME NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions (id)
+                );
+                """
+                cursor.execute(create_queries_table_sql)
+                print(
+                    f"✓ Created new 'queries' table. Old data archived in 'queries_legacy_{timestamp}'."
+                )
+
+            # 2. Check 'documents' table for 'session_id' column
+            cursor.execute("PRAGMA table_info(documents)")
+            doc_columns = [info[1] for info in cursor.fetchall()]
+            if "session_id" not in doc_columns:
+                print("⚡ Migrating DB: Adding 'session_id' to 'documents' table...")
+                cursor.execute(
+                    "ALTER TABLE documents ADD COLUMN session_id INTEGER REFERENCES sessions(id)"
+                )
+
+            self.conn.commit()
+
+        except sqlite3.Error as e:
+            print(f"✗ Database migration warning: {e}")
+
     def create_session(self, filenames: List[str]) -> int:
-        """
-        Creates a new session for one or more documents.
-
-        Args:
-            filenames: List of filenames to be processed in this session
-
-        Returns:
-            The session ID
-        """
-        # Create a session name from the filenames
+        """Creates a new session for one or more documents."""
         if len(filenames) == 1:
             session_name = filenames[0]
         else:
@@ -117,21 +164,7 @@ class DatabaseManager:
         chart_descriptions: Dict,
         session_id: Optional[int] = None,
     ) -> int:
-        """
-        Adds a new processed document to the database.
-
-        Args:
-            filename: Original filename
-            vision_model: Vision model used for processing
-            chart_dir: Directory where charts are stored
-            faiss_path: Path to FAISS index file
-            chunks_path: Path to chunks pickle file
-            chart_descriptions: Dictionary of chart descriptions
-            session_id: Optional session ID to link this document to
-
-        Returns:
-            The document ID
-        """
+        """Adds a new processed document to the database."""
         sql = """INSERT INTO documents(session_id, original_filename, vision_model_used, 
                  timestamp, chart_dir, faiss_index_path, chunks_path, chart_descriptions_json)
                  VALUES(?,?,?,?,?,?,?,?)"""
@@ -157,18 +190,7 @@ class DatabaseManager:
     def add_query_record(
         self, session_id: int, question: str, response: str, sources: List[Dict]
     ) -> int:
-        """
-        Adds a new question-answer record linked to a session.
-
-        Args:
-            session_id: The session ID this query belongs to
-            question: User's question
-            response: Assistant's response
-            sources: List of source documents/chunks used
-
-        Returns:
-            The query ID
-        """
+        """Adds a new question-answer record linked to a session."""
         sql = """INSERT INTO queries(session_id, question, response, sources_json, timestamp)
                  VALUES(?,?,?,?,?)"""
         cursor = self.conn.cursor()
@@ -179,12 +201,7 @@ class DatabaseManager:
         return cursor.lastrowid
 
     def get_all_sessions(self) -> List[Tuple[int, str, str, int]]:
-        """
-        Retrieves all past sessions with document count.
-
-        Returns:
-            List of tuples: (session_id, session_name, timestamp, doc_count)
-        """
+        """Retrieves all past sessions with document count."""
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -198,15 +215,7 @@ class DatabaseManager:
         return cursor.fetchall()
 
     def get_session_documents(self, session_id: int) -> List[Dict]:
-        """
-        Retrieves all documents in a session.
-
-        Args:
-            session_id: The session ID
-
-        Returns:
-            List of document dictionaries
-        """
+        """Retrieves all documents in a session."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM documents WHERE session_id = ?", (session_id,))
         rows = cursor.fetchall()
@@ -228,17 +237,6 @@ class DatabaseManager:
             )
         return documents
 
-    def get_all_documents(self) -> List[Tuple[int, str, str]]:
-        """
-        Retrieves all past document sessions, ordered by most recent.
-        DEPRECATED: Use get_all_sessions() instead for multi-document support.
-        """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT id, original_filename, timestamp FROM documents ORDER BY timestamp DESC"
-        )
-        return cursor.fetchall()
-
     def get_document_by_id(self, doc_id: int) -> Optional[Dict]:
         """Retrieves a single document's metadata by its ID."""
         cursor = self.conn.cursor()
@@ -247,8 +245,7 @@ class DatabaseManager:
         if not row:
             return None
 
-        # Convert row tuple to a dictionary for easier access
-        doc = {
+        return {
             "id": row[0],
             "session_id": row[1],
             "original_filename": row[2],
@@ -259,18 +256,9 @@ class DatabaseManager:
             "chunks_path": row[7],
             "chart_descriptions": json.loads(row[8]) if row[8] else {},
         }
-        return doc
 
     def get_queries_for_session(self, session_id: int) -> List[Dict]:
-        """
-        Retrieves the full Q&A history for a given session.
-
-        Args:
-            session_id: The session ID
-
-        Returns:
-            List of query dictionaries with question, response, sources, and timestamp
-        """
+        """Retrieves the full Q&A history for a given session."""
         cursor = self.conn.cursor()
         cursor.execute(
             """SELECT question, response, sources_json, timestamp 
@@ -291,49 +279,8 @@ class DatabaseManager:
             )
         return history
 
-    def get_queries_for_document(self, doc_id: int) -> List[Dict]:
-        """
-        Retrieves Q&A history for a document's session.
-        DEPRECATED: Use get_queries_for_session() instead.
-        """
-        # Get the document's session_id first
-        doc = self.get_document_by_id(doc_id)
-        if not doc or not doc.get("session_id"):
-            return []
-        return self.get_queries_for_session(doc["session_id"])
-
-    def delete_session(self, session_id: int) -> bool:
-        """
-        Deletes a session and all associated documents and queries.
-
-        Args:
-            session_id: The session ID to delete
-
-        Returns:
-            True if successful
-        """
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute("DELETE FROM queries WHERE session_id = ?", (session_id,))
-            cursor.execute("DELETE FROM documents WHERE session_id = ?", (session_id,))
-            cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-            self.conn.commit()
-            print(f"✓ Deleted session {session_id}")
-            return True
-        except sqlite3.Error as e:
-            print(f"✗ Error deleting session: {e}")
-            return False
-
     def get_session_info(self, session_id: int) -> Optional[Dict]:
-        """
-        Gets comprehensive information about a session.
-
-        Args:
-            session_id: The session ID
-
-        Returns:
-            Dictionary with session details, documents, and query count
-        """
+        """Gets comprehensive information about a session."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         row = cursor.fetchone()

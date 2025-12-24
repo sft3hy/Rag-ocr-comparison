@@ -24,6 +24,7 @@ def _display_interaction_details(results: list):
         if st.session_state.get("rag_pipelines"):
             for pipeline in st.session_state.rag_pipelines:
                 for result in results:
+                    # Check for chart markers in the text chunk
                     if (
                         "[CHART DESCRIPTION" in result["text"]
                         or "[SLIDE VISUAL DESCRIPTION" in result["text"]
@@ -57,12 +58,16 @@ def _display_interaction_details(results: list):
         # Step 3: Display the text sources
         st.markdown("##### 📄 Text Sources")
         for idx, result in enumerate(results, 1):
+            source_path = result.get("source", "Unknown")
+            source_name = Path(
+                source_path
+            ).name  # Converts "/tmp/.../File.pdf" -> "File.pdf"
             try:
-                # Calculate relevance score, handling potential score format issues
+                # Calculate relevance score
                 relevance_score = (1 / (1 + float(result.get("score", 1)))) * 100
-                source_info = f"**Source {idx} (from {result.get('source', 'Unknown')} - Page {result.get('page', 'N/A')})** - Relevance: {relevance_score:.1f}%"
+                source_info = f"**Source {idx} (from {source_name} - Page {result.get('page', 'N/A')})** - Relevance: {relevance_score:.1f}%"
             except (ValueError, TypeError):
-                source_info = f"**Source {idx} (from {result.get('source', 'Unknown')} - Page {result.get('page', 'N/A')})**"
+                source_info = f"**Source {idx} (from {source_name} - Page {result.get('page', 'N/A')})**"
 
             with st.container(border=True):
                 st.write(source_info)
@@ -152,10 +157,16 @@ def display_qa_interface():
 
     if question:
         session_id = st.session_state.get("active_session_id")
+        pipelines = st.session_state.get("rag_pipelines", [])
+
         if not session_id:
             st.error(
                 "Error: No active session found. Please load or start a new session."
             )
+            return
+
+        if not pipelines:
+            st.error("Error: RAG pipelines not initialized.")
             return
 
         # Display the user's new question
@@ -166,17 +177,15 @@ def display_qa_interface():
         with st.chat_message("assistant"):
             with st.spinner("🤔 Thinking..."):
                 try:
-                    # Use multi-document query if multiple documents are active
-                    if len(st.session_state.rag_pipelines) > 1:
-                        # Use the first pipeline to call query_multiple with all pipelines
-                        query_result = st.session_state.rag_pipelines[0].query_multiple(
-                            question, st.session_state.rag_pipelines, top_k=5
-                        )
-                    else:
-                        # Single document query
-                        query_result = st.session_state.rag_pipelines[0].query(
-                            question, top_k=5
-                        )
+                    # FIX: Dynamic top_k based on number of documents to prevent context bottleneck
+                    num_docs = len(pipelines)
+                    dynamic_k = 5 + (3 * (num_docs - 1))
+                    dynamic_k = min(dynamic_k, 20)  # Cap at 20
+
+                    # Use the first pipeline to execute query_multiple
+                    query_result = pipelines[0].query_multiple(
+                        question, pipelines, top_k=dynamic_k
+                    )
 
                     if "error" in query_result:
                         st.error(f"Error during query: {query_result['error']}")
@@ -195,7 +204,7 @@ def display_qa_interface():
                         sources=results,  # Save the detailed sources
                     )
 
-                    # Update session state history immediately for a responsive feel
+                    # Update session state history immediately
                     st.session_state.chat_history.append(
                         {"question": question, "response": answer, "sources": results}
                     )
@@ -214,16 +223,29 @@ def display_chart_browser():
     """
     # Collect charts from all active pipelines
     all_chart_files = []
-    chart_to_pipeline = {}  # Map chart file to its pipeline
+    chart_to_pipeline = {}  # Map chart file string to its pipeline
 
-    if st.session_state.get("rag_pipelines"):
-        for pipeline in st.session_state.rag_pipelines:
-            chart_dir = Path(pipeline.output_dir)
+    pipelines = st.session_state.get("rag_pipelines", [])
+
+    if pipelines:
+        for pipeline in pipelines:
+            # Resolve to absolute path to ensure uniqueness and reachability
+            chart_dir = Path(pipeline.output_dir).resolve()
+
             if chart_dir.exists():
+                # Get charts (assuming utils return paths, but we enforce resolution)
                 chart_files = get_all_chart_images(chart_dir)
+
                 for chart_file in chart_files:
-                    all_chart_files.append(chart_file)
-                    chart_to_pipeline[str(chart_file)] = pipeline
+                    # If chart_file is just a filename, join it with the absolute dir
+                    if not chart_file.is_absolute():
+                        full_path = chart_dir / chart_file.name
+                    else:
+                        full_path = chart_file.resolve()
+
+                    all_chart_files.append(full_path)
+                    # Use full path string as key to avoid collisions between docs
+                    chart_to_pipeline[str(full_path)] = pipeline
 
     if not all_chart_files:
         return
@@ -238,17 +260,15 @@ def display_chart_browser():
     if "chart_browser_idx" not in st.session_state:
         st.session_state.chart_browser_idx = 0
 
-    # Ensure index is within bounds
+    # Ensure index is within bounds (reset if out of bounds)
     if st.session_state.chart_browser_idx >= total_charts:
         st.session_state.chart_browser_idx = 0
 
     with st.expander(
-        f"📊 Detected Charts and Descriptions ({total_charts} total)", expanded=True
+        f"📊 Detected Charts and Descriptions ({total_charts} total)", expanded=False
     ):
         # Get info about which models were used
-        model_names = list(
-            set([p.vision_model_name for p in st.session_state.rag_pipelines])
-        )
+        model_names = list(set([p.vision_model_name for p in pipelines]))
         if len(model_names) == 1:
             st.caption(f"Charts analyzed with the **{model_names[0]}** vision model.")
         else:
@@ -262,24 +282,24 @@ def display_chart_browser():
         nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1, 3, 1, 1])
 
         with nav_col1:
-            if st.button("⬅️ Previous", width="stretch", disabled=total_charts <= 1):
+            if st.button("⬅️", width="stretch", disabled=total_charts <= 1):
                 st.session_state.chart_browser_idx = (idx - 1) % total_charts
                 st.rerun()
 
-        chart_path = Path(all_chart_files[idx])
+        chart_path = all_chart_files[idx]
         current_pipeline = chart_to_pipeline[str(chart_path)]
 
         with nav_col2:
             page_number = extract_page_number(chart_path)
-            # Get source document name
-            doc_name = Path(current_pipeline.output_dir).parent.name
+            # Get source document name from the pipeline's stored output path parent (or session info)
+            # A cleaner way is checking valid file paths, but this works for display
             st.markdown(
                 f"<h4 style='text-align: center; margin: 0;'>Chart {idx + 1} of {total_charts} (Page {page_number})</h4>",
                 unsafe_allow_html=True,
             )
 
         with nav_col3:
-            if st.button("Next ➡️", width="stretch", disabled=total_charts <= 1):
+            if st.button("➡️", width="stretch", disabled=total_charts <= 1):
                 st.session_state.chart_browser_idx = (idx + 1) % total_charts
                 st.rerun()
 
@@ -311,7 +331,7 @@ def display_chart_browser():
 
         st.markdown(description)
 
-        # --- Thumbnail Navigation (Optional - for quick browsing) ---
+        # --- Thumbnail Navigation (Optional) ---
         if total_charts > 1:
             st.subheader("🖼️ Quick Navigation")
 

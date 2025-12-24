@@ -89,6 +89,7 @@ def load_session(session_id: int):
             doc_ids = []
 
             for doc_data in documents:
+
                 # Re-initialize the RAG pipeline with the saved vision model
                 rag_pipeline = SmartRAG(
                     output_dir=doc_data["chart_dir"],
@@ -133,8 +134,8 @@ def load_session(session_id: int):
             traceback.print_exc()
 
 
-def load_session(doc_id: int):
-    """Handles the logic of loading a past session from the database."""
+def load_single_document(doc_id: int):
+    """Handles the logic of loading a single past document (Renamed to avoid conflict)."""
     with st.spinner(f"Loading session for document ID {doc_id}..."):
         try:
             doc_data = st.session_state.db_manager.get_document_by_id(doc_id)
@@ -180,60 +181,78 @@ def display_vision_model_selection():
 
     available_models = VisionModelFactory.get_available_models()
     model_descriptions = {
-        "Moondream2": "Fast & compact (1.6B) - Best for speed",
-        "Qwen3-VL-2B": "Balanced performance (2B) - Good accuracy",
-        "InternVL3.5-1B": "High accuracy (1B) - Best for quality",
+        "Moondream2": "Fast (1.6B) - Recommended (Python)",
+        "Qwen3-VL-2B": "Balanced (2B) - High Accuracy",
+        "InternVL3.5-1B": "Precise (1B) - Document optimized",
+        "Ollama-Gemma3": "Gemma 3 (4B) - Requires Ollama",
+        "Ollama-Granite3.2-Vision": "IBM Granite (2B) - Efficient Enterprise Vision",
     }
+
+    # Ensure valid selection
+    default_idx = 0
+    if st.session_state.get("selected_vision_model") in available_models:
+        default_idx = available_models.index(st.session_state.selected_vision_model)
 
     selected_model = st.selectbox(
         "Choose a vision model",
         available_models,
-        index=available_models.index(st.session_state.selected_vision_model),
+        index=default_idx,
         format_func=lambda x: f"{x} - {model_descriptions.get(x, '')}",
-        help="Select which vision model to use for analyzing charts and images. Runs locally.",
+        help="Select which vision model to use. Ollama models require the Ollama app running.",
     )
 
     # Update session state and reset processing if the model is changed
-    if selected_model != st.session_state.selected_vision_model:
+    if selected_model != st.session_state.get("selected_vision_model"):
         st.session_state.selected_vision_model = selected_model
-        if st.session_state.processing_complete:
+        if st.session_state.get("processing_complete"):
             st.warning("⚠️ Vision model changed. Please re-process your document.")
             st.session_state.processing_complete = False
             st.session_state.rag_pipelines = []
 
     with st.expander("ℹ️ Model Information"):
-        if selected_model == "Moondream2":
+        if "Gemma3" in selected_model:
             st.markdown(
                 """
-                - **Performance:** ~4 seconds per image
-                - **Parameters:** 1.6 Billion
-                - **Speed:** ⚡⚡⚡ Very Fast
-                - **Accuracy:** ⭐⭐ Good
-                - **Use Case:** Ideal for quick analysis and rapid prototyping.
-                - **Memory:** ~7GB VRAM
-                """
+            **Gemma 3 (4B)**
+            - Google's open multimodal model.
+            - **Requires:** `ollama pull gemma3`
+            - **Note:** The 1B version is text-only, so we use the 4B version for vision.
+            """
             )
-        elif selected_model == "Qwen3-VL-2B":
+        elif "Moondream" in selected_model:
             st.markdown(
                 """
-                - **Performance:** ~40 seconds per image
-                - **Parameters:** 2 Billion
-                - **Speed:** ⚡⚡ Fast
-                - **Accuracy:** ⭐⭐⭐ Very Good
-                - **Use Case:** A strong balance between speed and detailed analysis.
-                - **Memory:** ~12GB VRAM
-                """
+            **Moondream (1.6B)**
+            - Excellent balance of speed and vision capability.
+            - Running 'Moondream2' (Native) is usually faster than Ollama.
+            """
             )
-        elif selected_model == "InternVL3.5-1B":
+        elif "Granite" in selected_model:
             st.markdown(
                 """
-                - **Performance:** ~28 seconds per image
-                - **Parameters:** 1 Billion
-                - **Speed:** ⚡ Moderate
-                - **Accuracy:** ⭐⭐⭐⭐ Excellent
-                - **Use Case:** Best choice for high-stakes analysis requiring top accuracy.
-                - **Memory:** ~12GB VRAM
+            **IBM Granite 3.2 Vision (2B)**
+            - An enterprise-grade, efficient vision model optimized for safety and document understanding.
+            - **Requires:** `ollama pull granite3.2-vision`
+            """
+            )
+        elif "Qwen" in selected_model:
+            st.markdown(
                 """
+            **Qwen3-VL (2B)**
+            - A balanced powerhouse known for excellent OCR and visual reasoning capabilities.
+            - **Type:** Native Python (Runs via HuggingFace Transformers).
+            - **Best For:** High-resolution chart reading and complex text extraction.
+            """
+            )
+
+        elif "InternVL" in selected_model:
+            st.markdown(
+                """
+            **InternVL 3.5 (1B)**
+            - A specialized model optimized specifically for document structure and layout analysis.
+            - **Type:** Native Python (Runs via HuggingFace Transformers).
+            - **Best For:** Dense documents, tables, and fine-grained visual details.
+            """
             )
 
 
@@ -259,6 +278,7 @@ def display_document_uploader(groq_api_key: str):
         if len(uploaded_files) > 1:
             button_text += "s"
         if st.button(button_text, width="stretch"):
+            # print(uploaded_files)
             process_document(uploaded_files)
 
 
@@ -294,97 +314,106 @@ def process_document(uploaded_files):
             chart_dir = get_chart_output_dir(uploaded_file.name)
             chart_dir.mkdir(parents=True, exist_ok=True)
 
-            # Save uploaded file to a temporary path
-            file_ext = os.path.splitext(uploaded_file.name)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                temp_file_path = tmp_file.name
+            # --- CHANGE STARTS HERE ---
+            # Create a temporary directory to hold the file with its original name
+            # This ensures the 'source' attribute in chunks contains the real filename
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_file_path = os.path.join(temp_dir, uploaded_file.name)
 
-            status_text.markdown(
-                f"✅ **Temporary file created for {uploaded_file.name}**"
-            )
-            progress_bar.progress(
-                file_progress_start + int(file_progress_range * 0.05),
-                text=f"File {file_index + 1}/{total_files} saved. Initializing models.",
-            )
+                with open(temp_file_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
 
-            # Initialize RAG pipeline with the selected vision model
-            status_text.markdown(
-                f"🧠 **Initializing SmartRAG for {uploaded_file.name} with `{st.session_state.selected_vision_model}`...**"
-            )
-            rag_pipeline = SmartRAG(
-                output_dir=str(chart_dir),
-                vision_model_name=st.session_state.selected_vision_model,
-            )
-
-            progress_bar.progress(
-                file_progress_start + int(file_progress_range * 0.20),
-                text=f"Models initialized for file {file_index + 1}/{total_files}. Starting document analysis.",
-            )
-            status_text.markdown(
-                f"📊 **Parsing {uploaded_file.name} and detecting charts...**"
-            )
-
-            # Define a callback function to update the progress bar from the pipeline
-            def update_progress(current, total):
-                progress_percent = (
-                    file_progress_start
-                    + int(file_progress_range * 0.20)
-                    + int((current / total) * file_progress_range * 0.70)
+                status_text.markdown(
+                    f"✅ **Temporary file created: {uploaded_file.name}**"
                 )
                 progress_bar.progress(
-                    progress_percent,
-                    text=f"Processing file {file_index + 1}/{total_files} - page {current}/{total}...",
+                    file_progress_start + int(file_progress_range * 0.05),
+                    text=f"File {file_index + 1}/{total_files} saved. Initializing models.",
                 )
 
-            # Run the main indexing process
-            rag_pipeline.index_document(
-                temp_file_path,
-                chunk_size=500,
-                overlap=100,
-                progress_callback=update_progress,
-            )
-
-            progress_bar.progress(
-                file_progress_start + int(file_progress_range * 0.95),
-                text=f"Saving processed state for file {file_index + 1}/{total_files}...",
-            )
-
-            # Create the DB record for this document, linked to the session
-            doc_id = st.session_state.db_manager.add_document_record(
-                filename=uploaded_file.name,
-                vision_model=st.session_state.selected_vision_model,
-                chart_dir=str(chart_dir),
-                faiss_path="",  # Placeholder
-                chunks_path="",  # Placeholder
-                chart_descriptions=rag_pipeline.chart_descriptions,
-                session_id=session_id,  # Link to session
-            )
-            processed_doc_ids.append(doc_id)
-            processed_pipelines.append(rag_pipeline)
-
-            # Save the FAISS index and chunks using the new doc_id
-            faiss_path, chunks_path = rag_pipeline.save_state(doc_id)
-
-            # Update the record with the correct paths
-            st.session_state.db_manager.conn.execute(
-                "UPDATE documents SET faiss_index_path = ?, chunks_path = ? WHERE id = ?",
-                (faiss_path, chunks_path, doc_id),
-            )
-            st.session_state.db_manager.conn.commit()
-
-            # Clean up the temporary file for this document
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-
-            # Report charts found for this file
-            actual_charts = get_all_chart_images(chart_dir)
-            if actual_charts:
+                # Initialize RAG pipeline with the selected vision model
                 status_text.markdown(
-                    f"✅ **{uploaded_file.name}**: Found and analyzed {len(actual_charts)} charts."
+                    f"🧠 **Initializing SmartRAG for {uploaded_file.name} with `{st.session_state.selected_vision_model}`...**"
                 )
-            else:
-                status_text.markdown(f"⚠️ **{uploaded_file.name}**: No charts detected.")
+                rag_pipeline = SmartRAG(
+                    output_dir=str(chart_dir),
+                    vision_model_name=st.session_state.selected_vision_model,
+                )
+
+                progress_bar.progress(
+                    file_progress_start + int(file_progress_range * 0.20),
+                    text=f"Models initialized for file {file_index + 1}/{total_files}. Starting document analysis.",
+                )
+                status_text.markdown(
+                    f"📊 **Parsing {uploaded_file.name} and detecting charts...**"
+                )
+
+                # Define a callback function to update the progress bar from the pipeline
+                def update_progress(current, total):
+                    progress_percent = (
+                        file_progress_start
+                        + int(file_progress_range * 0.20)
+                        + int((current / total) * file_progress_range * 0.70)
+                    )
+                    progress_bar.progress(
+                        progress_percent,
+                        text=f"Processing file {file_index + 1}/{total_files} - page {current}/{total}...",
+                    )
+
+                # Run the main indexing process
+                # CHANGED: Removed 'chunk_size' and 'overlap' as they are handled internally by SmartRAG/DocumentChunker now
+                rag_pipeline.index_document(
+                    temp_file_path,
+                    progress_callback=update_progress,
+                )
+
+                progress_bar.progress(
+                    file_progress_start + int(file_progress_range * 0.95),
+                    text=f"Saving processed state for file {file_index + 1}/{total_files}...",
+                )
+
+                # Create the DB record for this document, linked to the session
+                doc_id = st.session_state.db_manager.add_document_record(
+                    filename=uploaded_file.name,
+                    vision_model=st.session_state.selected_vision_model,
+                    chart_dir=str(chart_dir),
+                    faiss_path="",  # Placeholder
+                    chunks_path="",  # Placeholder
+                    chart_descriptions=rag_pipeline.chart_descriptions,
+                    session_id=session_id,  # Link to session
+                )
+                processed_doc_ids.append(doc_id)
+                processed_pipelines.append(rag_pipeline)
+
+                # Save the FAISS index and chunks using the new doc_id
+                # CHANGED: save_state no longer returns paths, we construct them manually based on standard persistence
+                rag_pipeline.save_state(doc_id)
+
+                # Construct standard paths expected by the persistence layer
+                faiss_path = f"data/faiss_indexes/index_{doc_id}.faiss"
+                chunks_path = f"data/chunks/chunks_{doc_id}.pkl"
+
+                # Update the record with the correct paths
+                st.session_state.db_manager.conn.execute(
+                    "UPDATE documents SET faiss_index_path = ?, chunks_path = ? WHERE id = ?",
+                    (faiss_path, chunks_path, doc_id),
+                )
+                st.session_state.db_manager.conn.commit()
+
+                # Clean up the temporary file for this document
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+
+                # Report charts found for this file
+                actual_charts = get_all_chart_images(chart_dir)
+                if actual_charts:
+                    status_text.markdown(
+                        f"✅ **{uploaded_file.name}**: Found and analyzed {len(actual_charts)} charts."
+                    )
+                else:
+                    status_text.markdown(
+                        f"⚠️ **{uploaded_file.name}**: No charts detected."
+                    )
 
         # All files processed
         progress_bar.progress(100, text="All documents processed!")
@@ -421,16 +450,16 @@ def display_technology_explanations():
         st.markdown(
             """
             This app uses a **dual-model system** to maximize chart detection accuracy:
-            - **Table Transformer (TATR):** An AI model excellent for finding structured tables and charts.
-            - **Heuristic Detection:** A rules-based algorithm that catches charts TATR might miss by analyzing pixel variance and text density.
+            - **PubLayNet (Detectron2):** A powerful ML model trained to identify Layouts (Tables, Figures, Lists).
+            - **Heuristic Detection:** A rules-based algorithm that catches charts if the ML model misses, by analyzing pixel density and contours.
             
-            The results are combined and de-duplicated to ensure comprehensive coverage.
+            The results are prioritized to ensure figures are accurately cropped before analysis.
             """
         )
     with st.expander("👁️ Local Vision Models"):
         st.markdown(
             """
-            Chart and image understanding is performed **locally on your machine** using one of three powerful open-source vision models. By analyzing images locally, your data remains private. You can choose the model that best fits your hardware and accuracy needs.
+            Chart and image understanding is performed **locally on your machine** using one of the available open-source vision models (Moondream, Qwen, InternVL, or Ollama/Gemma). By analyzing images locally, your data remains private.
             """
         )
     with st.expander("🤖 Groq + Llama 4 for Q&A"):

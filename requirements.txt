@@ -12,3 +12,7 @@ PyMuPDF
 markitdown[all]
 ultralytics
 timm
+langchain
+langchain-text-splitters
+sentence-transformers
+ollama
